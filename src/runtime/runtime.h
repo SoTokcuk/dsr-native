@@ -54,7 +54,7 @@ struct RuntimeConfig {
     float screen_aspect = 0;  // width / height of the screen (Android: the window), 0 = unknown
     bool hud_box = true;      // other aspect ratios: keep the HUD and menus in a centred 16:9 box
     int screen_height = 0;    // the screen's shorter side in pixels (Android: the window), 0 = unknown
-    // sharp_hud (experimental): with a render scale, the HUD, menus and text drawn at the screen's resolution (up to
+    // sharp_hud: with a render scale, the HUD, menus and text drawn at the screen's resolution (up to
     // 1080 lines) instead of the render size (vk_backend.cpp, SharpStart).
     bool sharp_hud = false;
     int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied

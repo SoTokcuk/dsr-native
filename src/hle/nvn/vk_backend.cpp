@@ -1644,7 +1644,7 @@ private:
                 sharp_rh_ = rh;
                 sharp_h_ = target_h;
                 sharp_w_ = std::min(4096, int(std::lround(double(target_h) * rw / rh)) & ~1);
-                LOGI(kTag, "sharp_hud (experimental): the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d",
+                LOGI(kTag, "sharp_hud: the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d",
                      rw, rh, sharp_w_, sharp_h_);
             } else {
                 LOGI(kTag, "sharp_hud: off, the render size (%dx%d) is already as sharp as the screen allows (%d lines)", rw,
@@ -7157,7 +7157,7 @@ private:
     bool mip_skip_ = false;      // settings texture_mip_skip
     uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
-    // ---- sharp_hud (experimental) -----------------------------------------------------------------------------
+    // ---- sharp_hud ------------------------------------------------------------------------------------------
     // With a render scale the game draws its HUD, menus and text at the render size too (blurry once enlarged to the
     // screen). Here they go into a "sharp" image the size of the screen (up to 1080 lines) instead: the game's frame
     // (3D and post-processing, still at the render size) is enlarged into it when its first HUD draw comes (see
