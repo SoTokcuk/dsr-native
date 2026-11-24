@@ -88,6 +88,7 @@
     X(vkFreeMemory)                  \
     X(vkGetBufferMemoryRequirements) \
     X(vkGetDeviceQueue)              \
+    X(vkGetDeviceFaultInfoEXT)       \
     X(vkGetFenceStatus)              \
     X(vkGetImageMemoryRequirements)  \
     X(vkGetPipelineCacheData)        \

@@ -1630,7 +1630,7 @@ private:
         qci.queueFamilyIndex = family_;
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
-        const char* dev_ext[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr};
+        const char* dev_ext[4] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr, nullptr, nullptr};
         uint32_t ndev_ext = 1;
         // Image format lists (core in 1.2): with them, sRGB/linear-viewable images keep their compression.
         // settings image_format_list: -1 = auto, 0 = off, 1 = also on other Vulkan 1.1 drivers.
@@ -1657,6 +1657,22 @@ private:
             LOGI(kTag, "image format lists: %s", format_list_ ? "VK_KHR_image_format_list" : "not used");
         } else if (fl_mode == 0) {
             LOGI(kTag, "image format lists: off (settings image_format_list = 0)");
+        }
+        // VK_EXT_device_fault: after VK_ERROR_DEVICE_LOST the driver can say what faulted (Arm's Mali drivers report
+        // "Tile heap overflow", the invalid address of a GPU page fault, etc.). Only on the next start, when the device
+        // is made again, but the log of the lost device is what a bug report needs.
+        {
+            uint32_t n = 0;
+            vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, nullptr);
+            std::vector<VkExtensionProperties> exts(n);
+            vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, exts.data());
+            for (const VkExtensionProperties& e : exts)
+                if (!strcmp(e.extensionName, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+                    dev_ext[ndev_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+                    device_fault_ = true;
+                    break;
+                }
+            if (device_fault_) LOGI(kTag, "device fault reporting: VK_EXT_device_fault");
         }
         VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext = &en2;
@@ -3713,6 +3729,38 @@ private:
     // giving up (VK_TIMEOUT) after much less than 5 s. Now it waits again until the fence signals (a GPU that is
     // really stuck: up to 60 s, then the whole queue), and every early return is logged.
     uint64_t fence_retries_ = 0;
+    bool device_lost_ = false;
+    // VK_EXT_device_fault: why the GPU faulted. Arm's Mali drivers name the fault (for example "Tile heap overflow",
+    // the 180 MB of intermediate vertex/varying data one render pass may use) and give the address of a page fault.
+    void LogDeviceFault() {
+        if (!device_fault_ || !vkGetDeviceFaultInfoEXT) return;
+        VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+        VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+        VkResult r = vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
+        if (r != VK_SUCCESS) {
+            LOGW(kTag, "device fault: the driver returned %d for its fault info", int(r));
+            return;
+        }
+        VkDeviceFaultAddressInfoEXT addr[8]{};
+        VkDeviceFaultVendorInfoEXT vendor[8]{};
+        counts.addressInfoCount = std::min<uint32_t>(counts.addressInfoCount, 8);
+        counts.vendorInfoCount = std::min<uint32_t>(counts.vendorInfoCount, 8);
+        info.pAddressInfos = addr;
+        info.pVendorInfos = vendor;
+        r = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+        if (r != VK_SUCCESS) {
+            LOGW(kTag, "device fault: the fault info could not be read (%d)", int(r));
+            return;
+        }
+        LOGW(kTag, "device fault: %s", info.description);
+        for (uint32_t i = 0; i < counts.addressInfoCount; i++)
+            LOGW(kTag, "  fault address %u: type %d, address 0x%llx, precision 0x%llx", i, int(addr[i].addressType),
+                 (unsigned long long)addr[i].reportedAddress, (unsigned long long)addr[i].addressPrecision);
+        for (uint32_t i = 0; i < counts.vendorInfoCount; i++)
+            LOGW(kTag, "  vendor fault %u: %s (code 0x%llx)", i, vendor[i].description,
+                 (unsigned long long)vendor[i].vendorFaultCode);
+        if (counts.vendorBinarySize) LOGW(kTag, "  vendor fault binary: %u bytes", counts.vendorBinarySize);
+    }
     void WaitSlotFence(Slot& sl) {
         const auto start = std::chrono::steady_clock::now();
         for (int attempt = 0;; attempt++) {
@@ -3726,7 +3774,11 @@ private:
                 LOGW(kTag, "GPU fence wait returned %d after %.0f ms (attempt %d): waiting again", int(r), ms, attempt + 1);
             }
             if (r == VK_ERROR_DEVICE_LOST) {
-                LogOnce("device-lost", "the GPU device was lost: rendering can no longer be trusted");
+                if (!device_lost_) {
+                    device_lost_ = true;
+                    LogDeviceFault();
+                    LOGW(kTag, "the GPU device was lost: rendering can no longer be trusted");
+                }
                 return;
             }
             if (r != VK_TIMEOUT) {
@@ -4334,6 +4386,7 @@ private:
             });
             rendering_ = false;
             pass_breaks_[line]++;
+            pass_span_vertices_ = 0;  // Mali's per-pass vertex estimate (see Draw)
             if (mali_barriers_)
                 for (size_t i = 0; i < pass_color_count_; i++) {
                     Image* c = pass_colors_[i];
@@ -5382,6 +5435,7 @@ private:
         VkBuffer vb_bufs[16] = {};
         VkDeviceSize index_off = 0;
         VkBuffer index_buf = stream_;
+        uint64_t draw_span = 0;  // Mali: vertices this draw's index range covers (see the pass split below)
         {
             static const int8_t kTopology[14] = {
                 VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, -1, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
@@ -5453,6 +5507,7 @@ private:
                     }
                     if (index_off == VK_WHOLE_SIZE) return Skip("index data too large");
                 }
+                draw_span = uint64_t(std::max<int64_t>(0, vmax - vmin + 1));
                 fast_draws_++;
             }
         }
@@ -5484,6 +5539,7 @@ private:
                 for (int i = 0; i < p.count; i++) expanded[size_t(i)] = uint32_t(i);
             }
             if (max_vertex - min_vertex > (8 << 20)) return Skip("vertex range too large");
+            draw_span = uint64_t(std::max<int64_t>(0, max_vertex - min_vertex + 1));
             // Primitive conversions Vulkan lacks.
             use_indices = indexed;
             switch (topology_mode) {
@@ -5591,10 +5647,32 @@ private:
         Phase(5);
         // ---- queue the draw: the recorder thread builds its descriptor sets and records it --------------------
         LogOneShotDraw(p, colors, depth);
+        // Mali keeps the intermediate vertex output of a whole render pass in a fixed 180 MB region (about 2M
+        // vertices at 64 bytes of varyings) and loses the device when a pass exceeds it; the driver counts every
+        // vertex between a draw's lowest and highest index, not only those the indices use. A pass whose estimated
+        // vertex ranges add up past mali_pass_vertices is ended here and started again with the targets loaded, the
+        // incremental rendering Arm recommends. Large areas (and their first frame after a load) are what needs it.
+        const uint64_t instances = uint64_t(std::max(1, p.instances));
+        if (draw_span) draw_span = draw_span > (4000000 / instances) ? 4000000 : draw_span * instances;
+        if (mali_ && draw_span > uint64_t(dsr::GetRuntime().config.mali_pass_vertices) &&
+            dsr::GetRuntime().config.mali_pass_vertices > 0)
+            LogOnce("mali-big-draw", "Mali: one draw references more vertices than the whole pass may hold: a pass "
+                                     "split cannot help (see the vertex-range stats)");
+        if (mali_ && rendering_ && draw_span && dsr::GetRuntime().config.mali_pass_vertices > 0 &&
+            pass_span_vertices_ + draw_span > uint64_t(dsr::GetRuntime().config.mali_pass_vertices)) {
+            EndRendering();
+            pass_splits_++;
+            LogOnce("mali-pass-split", "Mali: render pass split before it exceeds the 180 MB intermediate-geometry "
+                                       "limit (mali_pass_vertices)");
+        }
         first_draw_ = {&p, fs, modes, depth != nullptr, shader_depth_test};
         const bool rendering_ok = EnsureRendering(colors, depth, &extent);
         first_draw_ = {};
         if (!rendering_ok) return Skip("no render target");
+        if (draw_span) {
+            pass_span_vertices_ += draw_span;
+            pass_span_max_ = std::max(pass_span_max_, pass_span_vertices_);
+        }
         if (depth && fs->info.writes_depth && st_.depth.depth_write) depth->depth_exported = depth->fragdepth_written = true;
         DrawPacket d;
         d.pipeline = pipeline;
@@ -7001,6 +7079,12 @@ private:
         turbo_scoped_ = turbo_full_ = 0;
         vertex_read_barriers_ = 0;
         render_passes_ = barriers_ = 0;
+        if (mali_ && (pass_splits_ || pass_span_max_)) {
+            LOGI(kTag, "Mali: vertex-range estimate per render pass: largest %llu, %llu pass(es) split (limit %d)",
+                 (unsigned long long)pass_span_max_, (unsigned long long)pass_splits_,
+                 dsr::GetRuntime().config.mali_pass_vertices);
+            pass_splits_ = pass_span_max_ = 0;
+        }
         if (!pass_breaks_.empty()) {
             std::vector<std::pair<uint64_t, int>> v;
             for (auto& [line, n] : pass_breaks_) v.push_back({n, line});
@@ -7181,6 +7265,7 @@ private:
     bool rp_fallback_ = false;  // no dynamic rendering: VkRenderPass + VkFramebuffer per pass
     bool format_list_ = false;  // VkImageFormatListCreateInfo usable (Vulkan 1.2 or VK_KHR_image_format_list)
     bool mali_ = false;         // ARM Mali (tile-based): set from the GPU name / vendor in EnsureDevice
+    bool device_fault_ = false; // VK_EXT_device_fault enabled: the driver's description of a lost device
     // Older GPUs (Adreno 6xx, Mali): images get VK_IMAGE_USAGE_STORAGE_BIT only once written as storage images, since
     // the usage turns off their bandwidth compression (UBWC, AFBC). storage_addrs_: the game addresses of those.
     bool lean_images_ = false;
@@ -8099,6 +8184,8 @@ private:
     VkQueryPool ts_pool_ = VK_NULL_HANDLE;
     uint32_t ts_count_ = 0, ts_pass_[kMaxTimestamps] = {};
     uint64_t render_passes_ = 0, barriers_ = 0;
+    // Mali: vertex-range estimate of the current render pass, and how often it had to be split (see Draw).
+    uint64_t pass_span_vertices_ = 0, pass_span_max_ = 0, pass_splits_ = 0;
     std::map<int, uint64_t> pass_breaks_;
     std::map<std::string, uint64_t> sampled_breaks_;
     std::vector<uint32_t> query_pass_;

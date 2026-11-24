@@ -13,3 +13,7 @@ android/.idea/
 *.mp4
 exefs/
 game/
+
+# Logs copied in for analysis (not source).
+logs/
+

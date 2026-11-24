@@ -143,6 +143,11 @@ struct RuntimeConfig {
     // data kept on the GPU across frames), 32-512 MB. Smaller uses less RAM but fills sooner (emptied and refilled: a
     // short stall). Performance mode sets 64.
     int geo_cache_mb = 192;
+    // mali_pass_vertices (Mali): a render pass is split (end, then begin with LOAD) once the vertex ranges drawn in
+    // it reach this estimate. Mali keeps the intermediate output of every vertex between a draw's lowest and highest
+    // index in a 180 MB region for the whole render pass; beyond it the device is lost ("Tile heap overflow"). 0 =
+    // never split.
+    int mali_pass_vertices = 1500000;
     int max_anisotropy = 4;  // cap on the game's anisotropic filtering (0 = the game's own level); 16x taps are costly on Mali
     // anisotropy (settings menu "Anisotropic filtering"): -1 = as the game asks, 0 = off, 2 / 4 / 8 / 16 = that level on
     // every mipmapped, linearly filtered texture (capped at the GPU's limit). Sharper textures at grazing angles
