@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <mutex>
@@ -166,30 +167,46 @@ HLE_FUNC(_ZN2nn2fs9CloseFileENS0_10FileHandleE, void, fs_CloseFile, (HostFile * 
     close(f->fd);
     delete f;
 }
-static uint32_t ReadImpl(size_t* out, HostFile* f, int64_t off, void* buf, size_t size) {
+// Read failures are logged (the first 50): the game treats a failed read of its data as fatal on the Switch and
+// does not always recover here (an area whose models did not load is drawn without them).
+static std::atomic<int> g_read_failures{0};
+static void LogReadFailure(const HostFile* f, int64_t off, size_t size, size_t done, int err) {
+    if (g_read_failures.fetch_add(1) >= 50) return;
+    LOGW(kTag, "ReadFile('%s', offset %lld, %zu bytes): %s%s, %zu bytes read", f->path.c_str(), (long long)off, size,
+         err ? "failed: " : "short read", err ? strerror(err) : "", done);
+}
+static uint32_t ReadImpl(size_t* out, HostFile* f, int64_t off, void* buf, size_t size, bool must_fill) {
     size_t done = 0;
+    int eio_retries = 0;
     while (done < size) {
         ssize_t r = pread(f->fd, static_cast<char*>(buf) + done, size - done, off + int64_t(done));
         if (r < 0) {
             if (errno == EINTR) continue;
+            // An SD card or a slow storage driver can fail a read once and succeed when asked again.
+            if ((errno == EIO || errno == EAGAIN) && eio_retries++ < 3) {
+                usleep(2000);
+                continue;
+            }
+            LogReadFailure(f, off, size, done, errno);
             return FromErrno(errno);
         }
         if (r == 0) break;
         done += size_t(r);
     }
+    if (done != size && must_fill) LogReadFailure(f, off, size, done, 0);
     if (out) *out = done;
     return kOk;
 }
 HLE_FUNC(_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm, uint32_t, fs_ReadFile,
          (HostFile * f, int64_t off, void* buf, size_t size)) {
     size_t n = 0;
-    uint32_t r = ReadImpl(&n, f, off, buf, size);
+    uint32_t r = ReadImpl(&n, f, off, buf, size, true);
     if (r == kOk && n != size) return kOutOfRange;
     return r;
 }
 HLE_FUNC(_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm, uint32_t, fs_ReadFileOut,
          (size_t * out, HostFile* f, int64_t off, void* buf, size_t size)) {
-    return ReadImpl(out, f, off, buf, size);
+    return ReadImpl(out, f, off, buf, size, false);
 }
 HLE_FUNC(_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE, uint32_t, fs_WriteFile,
          (HostFile * f, int64_t off, const void* buf, size_t size, const int* option)) {
