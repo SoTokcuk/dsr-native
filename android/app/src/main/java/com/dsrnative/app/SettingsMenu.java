@@ -787,10 +787,7 @@ public final class SettingsMenu {
                     return;
                 }
                 mValues.put("render_scale", v);
-                if (tell)
-                    popup(title, Strings.t("next_start", title));
-                else
-                    Toast.makeText(mA, Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
+                Toast.makeText(mA, Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
             }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1255,7 +1252,7 @@ public final class SettingsMenu {
                         }
                     }
                 });
-                popup(Strings.t("tab_language"), Strings.t("lang_changed"));
+                Toast.makeText(mA, Strings.t("lang_changed"), Toast.LENGTH_SHORT).show();
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1474,10 +1471,8 @@ public final class SettingsMenu {
             now = true;
         }
         if (key.equals("aspect_ratio")) updateScaleLabel(parse(mValues.get("render_scale"), 1.0f));
-        if (now)
-            Toast.makeText(mA, Strings.t("applied", title), Toast.LENGTH_SHORT).show();
-        else
-            popup(title, Strings.t("next_start", title));
+        // Settings that apply at the next start say so in their note: a short toast, not a dialog to dismiss each time.
+        Toast.makeText(mA, now ? Strings.t("applied", title) : Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
     }
 
     private void cantSave() {
