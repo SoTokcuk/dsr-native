@@ -261,6 +261,51 @@ void ApplyLighterPostFx(Runtime& rt, const GameBuild& b) {
     LOGI("hooks", "lighter post-processing: no ambient occlusion, depth of field, camera motion blur or light shafts");
 }
 
+// Effect cluster overflow (a crash in the game itself). The render tasks draw a particle effect cluster
+// (FrpgFxClusterAppearance_Model.cpp) by copying each of its pieces into a per-thread buffer with room for 384
+// (1.0.3: the capacity at buffer+0x200; 1.0.0: a constant). The lock guarding the buffer lies right after the last
+// slot (buffer+0x8618; 1.0.0 +0x8608). With more pieces the game's check only reports "error !" (nothing in a
+// release build) and the copy goes on past the end: piece 385's matrix overwrites the lock, and unlocking it at the
+// end of the function calls through that data (SIGSEGV on MTR_n, pc main+0x624868 in DV 1.0.3; seen during a boss
+// attack). The check's report call becomes: count = capacity, also in the stack copy of the count the loop and the
+// final draw read back, then on as normal: an oversized cluster shows its first 384 pieces for that frame.
+struct FxClusterFix {
+    const char* build_id;
+    uint64_t at;          // adrp x0 (the report's arguments), reached only when the count is too large
+    uint32_t insn[3];     // adrp x0 / adrp x2 / add x0, x0, #lo
+    uint32_t count_insn;  // the count to keep: mov w23, w8 (capacity) or mov w23, #384
+    uint32_t store_insn;  // str x23, [sp, #slot] (the stack copy of the count)
+};
+const FxClusterFix kFxClusterFixes[] = {
+    {"5a797a3a", 0x628c5c, {0xB0007C20, 0xB0007C22, 0x912BCC00}, 0x52803017, 0xF90187F7},  // #384, [sp,#0x308]
+    {"6569410c", 0x623998, {0x90007BE0, 0x90007BE2, 0x9131D800}, 0x2A0803F7, 0xF900F3F7},  // w8, [sp,#0x1e0]
+    {"df3766a2", 0x623968, {0xD0007C00, 0xD0007C02, 0x9133D800}, 0x2A0803F7, 0xF900F3F7},
+};
+
+void ApplyFxClusterFix(Runtime& rt) {
+    const FxClusterFix* f = nullptr;
+    for (const FxClusterFix& x : kFxClusterFixes)
+        if (rt.main_nso.build_id_hex.rfind(x.build_id, 0) == 0) f = &x;
+    if (!f) return;
+    // b +0x10: past the report's last two instructions (add x2 / mov w1, bl report) to the code after the check.
+    const uint32_t to[3] = {f->count_insn, f->store_insn, 0x14000004};
+    for (int i = 0; i < 3; ++i) {
+        const uint32_t* at = reinterpret_cast<const uint32_t*>(rt.main.base() + f->at + 4 * i);
+        if (!rt.main.Contains(reinterpret_cast<uintptr_t>(at)) || *at != f->insn[i]) {
+            LOGW("hooks", "effect cluster fix not applied: main+0x%llx is not as expected",
+                 (unsigned long long)(f->at + 4 * i));
+            return;
+        }
+    }
+    std::string err;
+    for (int i = 0; i < 3; ++i)
+        if (!rt.main.PatchInstruction(f->at + 4 * i, f->insn[i], to[i], &err)) {
+            LOGW("hooks", "effect cluster fix: %s", err.c_str());
+            return;
+        }
+    LOGI("hooks", "effect cluster fix: effects with more than 384 pieces are drawn in part instead of overwriting memory");
+}
+
 void SkipIntroLogos(Runtime& rt, const GameBuild& b) {
     const LogoSkip* p = nullptr;
     for (const LogoSkip& l : kLogoSkips)
@@ -597,7 +642,7 @@ void InstallGameHooks() {
                 LOGI("hooks", "frame rate: own frame limiter, fps auto (60 / 30 / 20 fps, not below %d; changeable in game), "
                      "game time step follows the frame time", MinFps());
             else if (rt.config.unlocked_fps)
-                LOGI("hooks", "frame rate: own frame limiter, unlocked (experimental): up to %d fps, the screen's refresh "
+                LOGI("hooks", "frame rate: own frame limiter, refresh rate (experimental): up to %d fps, the screen's refresh "
                      "rate (changeable in game); game time step follows the frame time, physics may misbehave above 60",
                      FixedFps(rt.config));
             else
@@ -672,6 +717,7 @@ void InstallGameHooks() {
             }
         }
     }
+    ApplyFxClusterFix(rt);
     if (rt.config.skip_intro) SkipIntroLogos(rt, b);
     if (rt.config.performance_mode) ApplyPerformanceMode(rt, b);
     if (rt.config.lighter_post_fx) ApplyLighterPostFx(rt, b);
