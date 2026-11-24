@@ -588,7 +588,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "fsr")) cfg->fsr = v != 0;
             else if (!strcmp(key, "shadow_quality")) cfg->shadow_quality = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
-            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = v != 0;
+            else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);
             else if (!strcmp(key, "performance_mode")) cfg->performance_mode = v != 0;
             else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "pass_load_skip")) cfg->pass_load_skip = v != 0;

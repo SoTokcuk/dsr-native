@@ -69,8 +69,9 @@ struct RuntimeConfig {
     // the depth instead (vk_backend.cpp, PrepassStat).
     bool skip_prepass = false;
     // skip_hidden (experimental): world draws that covered no pixel in recent frames (occlusion queries) are left
-    // out, retested every few frames (vk_backend.cpp, OccDecide).
-    bool skip_hidden = false;
+    // out, retested every few frames (vk_backend.cpp, OccDecide). 1 = gentle (nothing left out while the camera moves),
+    // 2 = aggressive.
+    int skip_hidden = 0;
     int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied
     int render_height = 720;
     float render_scale = 1.0f;  // settings render_scale: 0.5 - 1.0 of the game's 720-line resolution

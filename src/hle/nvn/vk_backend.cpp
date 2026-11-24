@@ -1381,6 +1381,7 @@ public:
         if (!EnsureDevice()) return;
         ReportDraws();
         occ_frame_++;
+        if (occ_still_ < 1000000) occ_still_++;  // OccCamera sets it back to 0 when the camera moves
         // skip_hidden: keys of draws the game no longer issues (streamed geometry gets new addresses) go.
         if (occ_state_.size() > 12000 && (occ_frame_ & 127) == 0)
             for (auto it = occ_state_.begin(); it != occ_state_.end();) {
@@ -4979,6 +4980,7 @@ private:
         if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
             OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
             occ_judged_++;
+            if (!colors.empty() && colors[0] && occ_cam_frame_ != occ_frame_) OccCamera();
             const int act = OccDecide(occ_key);
             if (act == 2) {
                 occ_skipped_++;
@@ -6986,10 +6988,13 @@ private:
                  (unsigned long long)prepass_converted_, (unsigned long long)prepass_unmatched_, prepass_.size());
         prepass_skipped_ = prepass_converted_ = prepass_unmatched_ = 0;
         if (dsr::GetRuntime().config.skip_hidden)
-            LOGI(kTag, "skip_hidden: %llu draws judged, %llu left out, %llu drawn with a visibility query, %llu came back "
-                 "into view, %zu draws tracked (last 10 s)", (unsigned long long)occ_judged_, (unsigned long long)occ_skipped_,
-                 (unsigned long long)occ_queried_, (unsigned long long)occ_woke_, occ_state_.size());
-        occ_judged_ = occ_skipped_ = occ_queried_ = occ_woke_ = 0;
+            LOGI(kTag, "skip_hidden %s: %llu draws judged, %llu left out, %llu drawn with a visibility query (%llu of them "
+                 "hidden ones while the camera moved), %llu kept until their retest's result, %llu came back into view, "
+                 "%zu draws tracked (last 10 s)", dsr::GetRuntime().config.skip_hidden == 1 ? "gentle" : "aggressive",
+                 (unsigned long long)occ_judged_, (unsigned long long)occ_skipped_, (unsigned long long)occ_queried_,
+                 (unsigned long long)occ_moving_frames_, (unsigned long long)occ_kept_, (unsigned long long)occ_woke_,
+                 occ_state_.size());
+        occ_judged_ = occ_skipped_ = occ_queried_ = occ_woke_ = occ_moving_frames_ = occ_kept_ = 0;
         prehash_used_ = prehash_inline_ = 0;
         if (geo_buf_) {
             LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed), %.0f of %llu MB used, "
@@ -7853,6 +7858,7 @@ private:
         uint32_t last_seen = 0;
         uint8_t hidden = 0;      // consecutive tests with no samples
         bool veto = false;       // a draw of this key was drawn without a query: its visibility is unknown
+        uint64_t test_seq = 0;   // gentle: the submission whose query result settles the last retest
     };
     static constexpr uint32_t kOccQueries = 2048;
     static constexpr uint8_t kOccHiddenTests = 2;
@@ -7890,17 +7896,58 @@ private:
         *out = h;
         return true;
     }
+    // skip_hidden 1 (gentle, the default): what popped in while the camera turns was geometry at the screen's edges,
+    // hidden only because it was off screen, whose retest came 3 frames later and its result 2 more. Now:
+    // - while the camera moves (its matrix, the first 64 bytes of a world draw's vertex constants, changed this
+    //   frame or in the last kOccStillFrames frames) nothing is left out: every draw is drawn, with a query;
+    // - a draw needs kOccGentleTests empty results in a row (not 2) before it is left out;
+    // - a retested draw stays drawn (without a query) until its result is in, so it never blinks in for a frame.
+    // skip_hidden 2 (aggressive) is the first version: more saving, more pop-in.
+    static constexpr uint8_t kOccGentleTests = 4;
+    static constexpr uint32_t kOccGentleRetest = 4;
+    static constexpr uint32_t kOccStillFrames = 8;
+    float occ_cam_[16] = {};
+    uint32_t occ_cam_frame_ = ~0u;  // frame of the last camera sample
+    uint32_t occ_still_ = 0;        // frames the camera has not moved
+    uint64_t occ_moving_frames_ = 0, occ_kept_ = 0;
+    // The camera of this frame's first world draw with a colour target: moved since the last sample?
+    void OccCamera() {
+        occ_cam_frame_ = occ_frame_;
+        const BufferRange& c3 = st_.uniforms[0][0];
+        if (!c3.address || c3.size < 64 || !GuestRangeValid(c3.address, 64)) return;
+        float m[16];
+        memcpy(m, reinterpret_cast<const void*>(c3.address), sizeof(m));
+        bool moved = false;
+        for (int i = 0; i < 16 && !moved; i++) {
+            const float d = std::fabs(m[i] - occ_cam_[i]);
+            moved = !(d <= 1e-4f * std::max(1.0f, std::fabs(m[i])));  // (NaN counts as moved)
+        }
+        memcpy(occ_cam_, m, sizeof(m));
+        if (moved) occ_still_ = 0;
+    }
     // 0: draw, 1: draw with a query, 2: leave out.
     int OccDecide(uint64_t key) {
         if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat: start over
         OccState& s = occ_state_[key];
         s.last_seen = occ_frame_;
-        if (s.hidden >= kOccHiddenTests) {
-            // Every draw sharing this key is retested on the key's retest frame; retests are staggered by key so the
-            // hidden geometry does not all come back on the same frame.
-            if (s.last_test == occ_frame_) return 1;
+        const bool gentle = dsr::GetRuntime().config.skip_hidden == 1;
+        if (s.hidden >= (gentle ? kOccGentleTests : kOccHiddenTests)) {
+            if (s.last_test == occ_frame_) return 1;  // every draw of this key on its retest frame
+            if (gentle && occ_still_ < kOccStillFrames) {  // the camera moves: drawn, and tested again
+                s.last_test = occ_frame_;
+                s.test_seq = submit_seq_ + 1;
+                occ_moving_frames_++;
+                return 1;
+            }
+            if (gentle && s.test_seq > completed_seq_) {  // its retest's result is not in yet: stays drawn
+                occ_kept_++;
+                return 0;
+            }
+            // Retests staggered by key, so the hidden geometry does not all come back on the same frame.
+            const uint32_t retest = gentle ? kOccGentleRetest : kOccRetest;
             const uint32_t since = occ_frame_ - s.last_test;
-            if (since < kOccRetest || (occ_frame_ + uint32_t(key >> 7)) % kOccRetest != 0) return 2;
+            if (since < retest || (occ_frame_ + uint32_t(key >> 7)) % retest != 0) return 2;
+            s.test_seq = submit_seq_ + 1;
         }
         s.last_test = occ_frame_;
         return 1;
