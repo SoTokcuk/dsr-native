@@ -30,6 +30,7 @@
 #include <deque>
 #include <condition_variable>
 #include <map>
+#include <tuple>
 #include <mutex>
 #include <set>
 #include <string>
@@ -565,6 +566,7 @@ struct Image {
     bool storage = false;      // created with VK_IMAGE_USAGE_STORAGE_BIT
     bool mutable_fmt = false;  // created with VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT (views in `twin` allowed)
     uint64_t attach_gen = 0;  // times attached to a render pass (`hole_test` 16 copies)
+    uint64_t attached_list = 0;  // the list it was last attached to a render pass in (see WaitForOneShot)
     VkClearValue clear_value{};
     VkImageAspectFlags clear_aspect = 0;
     int clear_layer = 0, clear_level = 0;
@@ -2170,7 +2172,8 @@ private:
     Image* GetImage(const TexRef& t, bool upload) {
         if (!t.valid || t.tex.width <= 0 || t.tex.height <= 0) return nullptr;
         Image* img = FindImage(t);
-        if (!img) img = CreateImage(t);
+        if (!img) img = Unpark(t);
+        if (!img) img = CreateImage(t, true);
         if (!img) return nullptr;
         if (upload && TakeFrame(*img, t)) return img;
         if (upload && !img->written && !img->uploaded) {
@@ -2333,7 +2336,83 @@ private:
         return true;
     }
 
-    Image* CreateImage(const TexRef& t) {
+    // ---- Drawn images displaced by another use of their memory -------------------------------------------------
+    // The game describes some memory as two textures: the player's face is drawn by the GPU into a 128x128 RGBA8
+    // target in memory that a 256x512 BC1 texture (loaded from the game files) also names. Each use of the other
+    // description replaced the image (FindImage: one image per address), and an image only the GPU had drawn
+    // was then made again from game memory, which still held the file's BC1 bytes: the face turned to coloured
+    // noise. A drawn image that is displaced is now parked with a hash of the game memory under it, and brought
+    // back when its description is used again while that memory is unchanged (changed: the CPU wrote something
+    // new there, the drawn image is stale and is dropped).
+    struct Parked {
+        Image img;
+        uint64_t mem_hash = 0;
+        uint64_t order = 0;
+    };
+    std::map<std::tuple<uint64_t, int, int, int>, Parked> parked_;  // addr, NVN format, width, height
+    uint64_t park_order_ = 0, parks_ = 0, unparks_ = 0;
+    static constexpr size_t kMaxParked = 32;
+    void Park(Image& img) {
+        if (InOpenPass(&img)) EndRendering();
+        small_rts_.erase(&img);
+        const auto key = std::make_tuple(img.addr, img.nvn_format, img.width, img.height);
+        auto old = parked_.find(key);
+        if (old != parked_.end()) {
+            DestroyImage(old->second.img);
+            parked_.erase(old);
+        }
+        if (parked_.size() >= kMaxParked) {  // the longest parked goes
+            auto oldest = parked_.begin();
+            for (auto it = parked_.begin(); it != parked_.end(); ++it)
+                if (it->second.order < oldest->second.order) oldest = it;
+            DestroyImage(oldest->second.img);
+            parked_.erase(oldest);
+        }
+        TexRef ref;
+        ref.valid = true;
+        ref.addr = img.addr;
+        ref.tex = img.tex;
+        Parked& p = parked_[key];
+        p.mem_hash = SampleHash(ref);
+        p.order = ++park_order_;
+        p.img = std::move(img);
+        img = Image{};
+        if (++parks_ <= 8)
+            LOGI(kTag, "drawn image fmt %d %dx%d @%llx kept aside: its memory is used as another texture", p.img.nvn_format,
+                 p.img.width, p.img.height, (unsigned long long)p.img.addr);
+    }
+    Image* Unpark(const TexRef& t) {
+        if (parked_.empty()) return nullptr;
+        auto it = parked_.find(std::make_tuple(t.addr, t.tex.format, t.tex.width, t.tex.height));
+        if (it == parked_.end()) return nullptr;
+        TexRef ref;
+        ref.valid = true;
+        ref.addr = t.addr;
+        ref.tex = it->second.img.tex;
+        if (SampleHash(ref) != it->second.mem_hash) {  // new data written there since: the drawn image is stale
+            DestroyImage(it->second.img);
+            parked_.erase(it);
+            return nullptr;
+        }
+        auto cur = images_.find(t.addr);
+        if (cur != images_.end()) {
+            if (cur->second.written) {
+                Park(cur->second);
+                it = parked_.find(std::make_tuple(t.addr, t.tex.format, t.tex.width, t.tex.height));
+            } else {
+                DestroyImage(cur->second);
+            }
+            images_.erase(cur);
+            if (it == parked_.end()) return nullptr;  // made room for the one just parked
+        }
+        Image img = std::move(it->second.img);
+        parked_.erase(it);
+        if (++unparks_ <= 8)
+            LOGI(kTag, "drawn image fmt %d %dx%d @%llx brought back", img.nvn_format, img.width, img.height,
+                 (unsigned long long)img.addr);
+        return &images_.emplace(t.addr, std::move(img)).first->second;
+    }
+    Image* CreateImage(const TexRef& t, bool park_drawn = false) {
         VkFormatFeatureFlags feats = 0;
         VkFormat vf = PickFormat(t.tex.format, &feats);
         if (vf == VK_FORMAT_UNDEFINED) {
@@ -2344,7 +2423,8 @@ private:
         }
         auto old = images_.find(t.addr);
         if (old != images_.end()) {
-            DestroyImage(old->second);  // retired: destroyed once the GPU is done with it
+            if (park_drawn && old->second.written && old->second.image) Park(old->second);
+            else DestroyImage(old->second);  // retired: destroyed once the GPU is done with it
             images_.erase(old);
         }
         const TextureLayout layout = ComputeLayout(t.tex);
@@ -4106,6 +4186,7 @@ private:
                 a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
                 c->attach_unsynced = true;
                 c->attach_gen++;
+                c->attached_list = list_counter_;
                 NoteWritten(c);
                 c->written = true;
                 c->cpu_source = false;
@@ -5033,6 +5114,7 @@ private:
         st_.depth.depth_test = saved_depth_test;
         st_.color.blend_enable = saved_blend_enable;
         st_.channel.mask = saved_mask;
+        if (!pipeline && pipeline_pending_) pipeline = WaitForOneShot(colors, depth);
         if (!pipeline) {
             if (pipeline_pending_) return;  // compiling in the background: drawn once it is ready
             return Skip("pipeline creation failed");
@@ -5667,6 +5749,26 @@ private:
     std::unordered_map<uint64_t, std::pair<std::vector<uint32_t>, std::shared_ptr<PipelineJob>>> compiling_;
     uint64_t pipeline_waits_ = 0;  // draws skipped while their pipeline compiled (reported)
     bool pipeline_pending_ = false;  // the last GetPipeline returned null because it is still compiling
+    uint64_t pending_key_ = 0;       // its key
+    uint64_t one_shot_waits_ = 0;
+    // A draw whose pipeline is still compiling is skipped (async_pipelines): fine for what is drawn every frame
+    // (it appears a frame or two later), not for something drawn once into a texture the game keeps (the player's
+    // face is drawn into its texture when a character loads: skipped, the texture kept garbage). A draw into a
+    // target that was not drawn into in the last 2 lists waits for its pipeline.
+    VkPipeline WaitForOneShot(const std::vector<Image*>& colors, const Image* depth) {
+        bool one_shot = false;
+        for (const Image* c : colors)
+            if (c && c->attached_list + 2 < list_counter_) one_shot = true;
+        if (colors.empty() && depth && depth->attached_list + 2 < list_counter_) one_shot = true;
+        if (!one_shot) return VK_NULL_HANDLE;
+        auto it = compiling_.find(pending_key_);
+        if (it == compiling_.end()) return VK_NULL_HANDLE;
+        const std::shared_ptr<PipelineJob> job = it->second.second;
+        while (!job->done.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::microseconds(200));
+        one_shot_waits_++;
+        pipeline_pending_ = false;
+        return FinishCompile(pending_key_, it->second);
+    }
     void StartCompilers() {
         if (!compilers_.empty()) return;
         // 2 threads up to 7 cores, 3 on 8-9, 4 on 10+: phones with many slow cores build new scenery's
@@ -5734,7 +5836,10 @@ private:
         if (running != compiling_.end()) {
             VkPipeline p = FinishCompile(fk.h, running->second);
             pipeline_pending_ = !p;
-            if (!p) pipeline_waits_++;
+            if (!p) {
+                pipeline_waits_++;
+                pending_key_ = fk.h;
+            }
             return p;
         }
         std::vector<uint32_t> key;
@@ -5838,6 +5943,7 @@ private:
             if (!pipeline) {
                 pipeline_waits_++;
                 pipeline_pending_ = true;
+                pending_key_ = fk.h;
                 return VK_NULL_HANDLE;
             }
         } else {
@@ -6468,10 +6574,12 @@ private:
             images_retired_ = 0;
         }
         persist_hits_ = 0;
-        LOGI(kTag, "draw time by phase (ms):%s | %d pipelines compiled in %.0f ms (%llu draws waited for one) | %llu fast-path draws | %llu descriptor sets reused",
+        LOGI(kTag, "draw time by phase (ms):%s | %d pipelines compiled in %.0f ms (%llu draws waited for one, %llu draws "
+             "into a texture not drawn recently waited for theirs) | %llu fast-path draws | %llu descriptor sets reused",
              phases.c_str(), new_pipelines_, compile_ms_, (unsigned long long)pipeline_waits_,
-             (unsigned long long)fast_draws_, (unsigned long long)desc_reused_);
+             (unsigned long long)one_shot_waits_, (unsigned long long)fast_draws_, (unsigned long long)desc_reused_);
         pipeline_waits_ = 0;
+        one_shot_waits_ = 0;
         desc_reused_ = 0;
         if (new_pipelines_) SavePipelineCache();
         new_pipelines_ = 0;
