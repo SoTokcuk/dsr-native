@@ -32,8 +32,13 @@ uint64_t PackCode(const char* s) {
 HLE_FUNC(_ZN2nn2oe10InitializeEv, void, oe_Initialize, ()) {}
 HLE_FUNC(_ZN2nn2oe16GetOperationModeEv, int, oe_GetOperationMode, ()) { return dsr::GetRuntime().config.docked ? 1 : 0; }
 HLE_FUNC(_ZN2nn2oe20GetCurrentFocusStateEv, int, oe_GetCurrentFocusState, ()) { return 1; /* InFocus */ }
+// The Switch reports Chinese as the script codes zh-Hans / zh-Hant (the region codes zh-CN / zh-TW are only
+// legacy enum values), and the game looks for exactly those strings: given zh-CN or zh-TW it fell back to English.
 HLE_FUNC(_ZN2nn2oe18GetDesiredLanguageEv, uint64_t, oe_GetDesiredLanguage, ()) {
-    return PackCode(dsr::GetRuntime().config.language.c_str());
+    const std::string& lang = dsr::GetRuntime().config.language;
+    if (lang == "zh-CN") return PackCode("zh-Hans");
+    if (lang == "zh-TW") return PackCode("zh-Hant");
+    return PackCode(lang.c_str());
 }
 HLE_FUNC(_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE, void, oe_GetDisplayVersion, (char* out)) {
     const char* v = dsr::GameVersion();  // the version the program is (1.0.0 or the 1.0.3 update)
