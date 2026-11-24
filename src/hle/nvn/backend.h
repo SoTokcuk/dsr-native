@@ -188,6 +188,11 @@ bool GuestRangeValid(uint64_t addr, size_t size);
 // Hands a linear RGBA8 picture (w x h, tightly packed) to the backend as the new contents of a texture:
 // `addr` is the texture's storage address or an NVNtexture object pointer. False if no such RGBA8 texture.
 bool SubmitTextureFrame(uint64_t addr, std::shared_ptr<const std::vector<uint8_t>> rgba, int w, int h);
+// Diagnostics for the player's face texture (128x128 RGBA8: all zero here, the head looks dark): such
+// textures are watched from their creation. IsWatchedTexture: does [addr, addr + size) overlap one.
+// CheckWatchedTextures (render thread, each list) logs when the game memory under one changes.
+bool IsWatchedTexture(uint64_t addr, size_t size = 1);
+void CheckWatchedTextures();
 
 // Per-frame statistics, reported every 10 s by the present path.
 struct GpuStats {

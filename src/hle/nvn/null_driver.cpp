@@ -12,6 +12,8 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
+#include <vector>
 #include <unordered_map>
 #include <thread>
 
@@ -74,6 +76,66 @@ size_t AlignUp(size_t v, size_t a) { return (v + a - 1) / a * a; }
 size_t StorageSize(const TextureState& t) { return AlignUp(std::max<size_t>(ComputeLayout(t).total, 512), 512); }
 
 uintptr_t PoolBase(const void* pool) { return reinterpret_cast<uintptr_t>(g_pools.Copy(pool).storage); }
+
+// ---- face texture diagnostics (see IsWatchedTexture) ----------------------------------------------------
+struct Watched {
+    uint64_t addr = 0;
+    size_t size = 0;
+    uint64_t hash = 0;
+    int changes = 0;
+};
+std::mutex g_watch_mutex;
+std::vector<Watched> g_watched;
+std::atomic<int> g_watch_count{0};
+
+uint64_t HashBytes(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, std::min<size_t>(8, n - i));
+        h = (h ^ v) * 1099511628211ull;
+    }
+    return h;
+}
+
+// The guest code that called into NVN: return addresses up the guest's frame-record chain, as main+offset.
+std::string GuestCallers(const void* host_frame) {
+    const loader::Module& m = dsr::GetRuntime().main;
+    std::string out;
+    const uint64_t* fp = static_cast<const uint64_t*>(host_frame);
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(host_frame);
+    for (int depth = 0; depth < 10 && fp; depth++) {
+        const uintptr_t next = uintptr_t(fp[0]), ra = uintptr_t(fp[1]);
+        if (m.Contains(ra)) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), " main+0x%lx", (unsigned long)(ra - m.base()));
+            out += buf;
+        }
+        // Frame records go up the same stack: stop at anything that does not.
+        if (next <= uintptr_t(fp) || next > lo + (1u << 20) || (next & 15)) break;
+        fp = reinterpret_cast<const uint64_t*>(next);
+    }
+    return out.empty() ? " (unknown)" : out;
+}
+
+void WatchTexture(const TextureState& t, uint64_t addr, const void* host_frame) {
+    const size_t size = ComputeLayout(t).total;
+    const int n = g_watch_count.fetch_add(1);
+    MemoryPoolState pool = g_pools.Copy(t.pool);
+    const uint64_t hash = GuestRangeValid(addr, size) ? HashBytes(reinterpret_cast<const uint8_t*>(addr), size) : 0;
+    if (n < 24)
+        LOGI(kTag, "face texture diagnostics: %dx%d format %d (flags 0x%x, levels %d, stride %d) created @%llx, pool flags "
+             "0x%x, memory hash %016llx, from%s", t.width, t.height, t.format, t.flags, t.levels, t.stride,
+             (unsigned long long)addr, pool.flags, (unsigned long long)hash, GuestCallers(host_frame).c_str());
+    std::lock_guard<std::mutex> lk(g_watch_mutex);
+    for (Watched& w : g_watched)
+        if (w.addr == addr) {
+            w = {addr, size, hash, 0};
+            return;
+        }
+    if (g_watched.size() >= 8) g_watched.erase(g_watched.begin());
+    g_watched.push_back({addr, size, hash, 0});
+}
 
 // ---- device ----------------------------------------------------------------------------------------
 // Returns 0 so getters that fall back to it never hand garbage to the game.
@@ -365,6 +427,8 @@ bool TexInitialize(void* tex, const void* b) {
         std::lock_guard<std::mutex> lk(g_tex_addr_mutex);
         g_tex_by_addr[PoolBase(t.pool) + uint64_t(t.offset)] = t;
     }
+    if (t.pool && t.width == 128 && t.height == 128 && t.format == 37 && t.target == kTarget2D)
+        WatchTexture(t, PoolBase(t.pool) + uint64_t(t.offset), __builtin_frame_address(0));
     return true;
 }
 
@@ -388,7 +452,16 @@ uint64_t VideoTextureStorage(uint64_t addr, int w, int h) {
     if (t.width != w || t.height != h) return 0;
     return addr;
 }
-void TexFinalize(void* tex) { g_textures.Erase(tex); }
+void TexFinalize(void* tex) {
+    if (g_watch_count.load(std::memory_order_relaxed)) {
+        const TextureState t = g_textures.Copy(tex);
+        const uint64_t addr = t.pool ? PoolBase(t.pool) + uint64_t(t.offset) : 0;
+        if (addr && IsWatchedTexture(addr))
+            LOGI(kTag, "face texture diagnostics: %dx%d format %d @%llx finalized, from%s", t.width, t.height, t.format,
+                 (unsigned long long)addr, GuestCallers(__builtin_frame_address(0)).c_str());
+    }
+    g_textures.Erase(tex);
+}
 int TexGetWidth(const void* t) { return g_textures.Copy(t).width; }
 int TexGetHeight(const void* t) { return g_textures.Copy(t).height; }
 int TexGetDepth(const void* t) { return g_textures.Copy(t).depth; }
@@ -436,6 +509,9 @@ void TexWriteTexelsStrided(const void* tex, const void* /*view*/, const CopyRegi
         }
     }
     GetBackend().MarkTextureDirty(uint64_t(reinterpret_cast<uintptr_t>(base)));
+    if (IsWatchedTexture(uint64_t(reinterpret_cast<uintptr_t>(base))))
+        LOGI(kTag, "face texture diagnostics: nvnTextureWriteTexels %dx%d into it, from%s", w, h,
+             GuestCallers(__builtin_frame_address(0)).c_str());
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) < 4)
         LOGI(kTag, "nvnTextureWriteTexels %dx%d at %d,%d into %dx%d format %d", w, h, region->x, region->y, t.width,
@@ -603,6 +679,35 @@ bool SubmitTextureFrame(uint64_t addr, std::shared_ptr<const std::vector<uint8_t
     GetBackend().SetTextureFrame(storage, std::move(rgba), w, h);
     return true;
 }
+bool IsWatchedTexture(uint64_t addr, size_t size) {
+    if (!g_watch_count.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lk(g_watch_mutex);
+    for (const Watched& w : g_watched)
+        if (addr < w.addr + w.size && w.addr < addr + std::max<size_t>(size, 1)) return true;
+    return false;
+}
+
+void CheckWatchedTextures() {
+    if (!g_watch_count.load(std::memory_order_relaxed)) return;
+    static int calls = 0;
+    if (++calls % 30) return;  // twice a second or so
+    std::lock_guard<std::mutex> lk(g_watch_mutex);
+    for (Watched& w : g_watched) {
+        if (!GuestRangeValid(w.addr, w.size)) continue;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(w.addr);
+        const uint64_t h = HashBytes(p, w.size);
+        if (h == w.hash) continue;
+        w.hash = h;
+        if (++w.changes > 6) continue;
+        uint64_t sum[4] = {};
+        for (size_t i = 0; i + 4 <= w.size; i += 4)
+            for (int c = 0; c < 4; c++) sum[c] += p[i + c];
+        const double n = double(w.size / 4);
+        LOGI(kTag, "face texture diagnostics: memory @%llx changed (change %d): byte means %.1f %.1f %.1f %.1f",
+             (unsigned long long)w.addr, w.changes, sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n);
+    }
+}
+
 bool GuestRangeValid(uint64_t addr, size_t size) {
     // Called many times per draw (~5% of the render thread with a 4-entry cache and a lock on misses): each
     // thread keeps a copy of the sorted pool list, refreshed only when pools change, and searches it lock-free.

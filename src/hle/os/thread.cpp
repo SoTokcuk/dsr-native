@@ -235,8 +235,20 @@ HLE_ALIAS(nnosDestroyThread, nn_os_DestroyThread);
 HLE_FUNC(_ZN2nn2os16GetCurrentThreadEv, GuestThread*, nn_os_GetCurrentThread, ()) { return CurrentThread(); }
 HLE_ALIAS(nnosGetCurrentThread, nn_os_GetCurrentThread);
 
+// Each guest thread name, once (which of the game's worker threads exist; diagnostics).
+static void LogThreadName(const char* name) {
+    static std::mutex m;
+    static std::vector<std::string> seen;
+    const std::string n = name ? name : "";
+    std::lock_guard<std::mutex> lk(m);
+    if (seen.size() >= 128 || std::find(seen.begin(), seen.end(), n) != seen.end()) return;
+    seen.push_back(n);
+    LOGI("os", "guest thread named \"%s\"", n.c_str());
+}
+
 HLE_FUNC(_ZN2nn2os13SetThreadNameEPNS0_10ThreadTypeEPKc, void, nn_os_SetThreadName,
          (GuestThread * t, const char* name)) {
+    LogThreadName(name);
     if (HostThread* ht = Lookup(t)) {
         ht->name = name ? name : "";
         ht->name_ptr = nullptr;
@@ -246,6 +258,7 @@ HLE_FUNC(_ZN2nn2os13SetThreadNameEPNS0_10ThreadTypeEPKc, void, nn_os_SetThreadNa
 }
 
 HLE_FUNC(nnosSetThreadNamePointer, void, nnosSetThreadNamePointer, (GuestThread * t, const char* name)) {
+    LogThreadName(name);
     if (HostThread* ht = Lookup(t)) {
         ht->name = name ? name : "";
         ht->name_ptr = name;

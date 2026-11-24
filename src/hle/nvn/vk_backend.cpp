@@ -633,6 +633,10 @@ public:
                     st_.num_rt = c.num_rt;
                     st_.rts = c.rts ? *c.rts : std::vector<TexRef>{};
                     LogTargets(st_.rts, st_.num_rt);
+                    for (size_t i = 0; i < st_.rts.size(); i++)
+                        if (st_.rts[i].valid && IsWatchedTexture(st_.rts[i].addr) && watch_logs_++ < 40)
+                            LOGI(kTag, "face texture diagnostics: @%llx set as render target %zu (list %llu)",
+                                 (unsigned long long)st_.rts[i].addr, i, (unsigned long long)list_counter_);
                     break;
                 case CmdType::ClearColor:
                     if (c.mask == 0 || c.index < 0 || c.index >= st_.num_rt) break;
@@ -665,6 +669,10 @@ public:
                             EndRendering();
                             ClearColorImage(*img, c.color, c.kind, layer, level);
                         }
+                        if (IsWatchedTexture(img->addr) && watch_logs_++ < 40) {
+                            LOGI(kTag, "face texture diagnostics: render target @%llx cleared (list %llu)",
+                                 (unsigned long long)img->addr, (unsigned long long)list_counter_);
+                        }
                     }
                     break;
                 case CmdType::ClearTexture:
@@ -673,6 +681,9 @@ public:
                         Begin();
                         EndRendering();
                         ClearColorImage(*img, c.color, c.kind);
+                        if (IsWatchedTexture(img->addr) && watch_logs_++ < 40)
+                            LOGI(kTag, "face texture diagnostics: texture @%llx cleared (list %llu)",
+                                 (unsigned long long)img->addr, (unsigned long long)list_counter_);
                     }
                     break;
                 case CmdType::ClearDepthStencil: ClearDepth(c); break;
@@ -680,6 +691,11 @@ public:
                     if (!c.copy) break;
                     Image* src = GetImage(c.copy->src, true);  // a CPU-written source (video frames) is refreshed
                     Image* dst = GetImage(c.copy->dst, false);
+                    if (dst && IsWatchedTexture(dst->addr) && watch_logs_++ < 40)
+                        LOGI(kTag, "face texture diagnostics: copy into @%llx from %dx%d format %d @%llx (%s, list %llu)",
+                             (unsigned long long)dst->addr, src ? src->width : 0, src ? src->height : 0,
+                             src ? src->nvn_format : 0, (unsigned long long)c.copy->src.addr,
+                             src ? (src->written ? "drawn/uploaded" : "empty") : "no image", (unsigned long long)list_counter_);
                     if (!src || !dst || src == dst) break;
                     Begin();
                     EndRendering();
@@ -697,6 +713,10 @@ public:
                     break;
                 }
                 case CmdType::CopyBufferToBuffer:
+                    if (IsWatchedTexture(c.dst_addr, c.size64) && watch_logs_++ < 40)
+                        LOGI(kTag, "face texture diagnostics: buffer copy of %llu bytes @%llx -> @%llx (list %llu)",
+                             (unsigned long long)c.size64, (unsigned long long)c.src_addr, (unsigned long long)c.dst_addr,
+                             (unsigned long long)list_counter_);
                     if (c.size64 && GuestRangeValid(c.src_addr, c.size64) && GuestRangeValid(c.dst_addr, c.size64)) {
                         FinishCopies();  // earlier draws' data copied before it changes
                         memmove(reinterpret_cast<void*>(c.dst_addr), reinterpret_cast<const void*>(c.src_addr), c.size64);
@@ -879,6 +899,7 @@ public:
         ApplyBgConversions();
         MaybeArmCapture();
         ApplyDirtyMarks();
+        CheckWatchedTextures();
         if (!watched_copies_.empty()) CheckWatchedCopies();
         PollReadbacks();
         geo_token_list_ = ++geo_token_;
@@ -929,6 +950,7 @@ public:
     // Textures the CPU wrote through NVN (nvnTextureWriteTexels): checked at their next use. Thread-safe.
     // Addresses queued by any thread; the render thread applies them at the start of each list (the images
     // there are checked at their next use; addresses with no image yet need nothing: they upload when used).
+    int watch_logs_ = 0;  // face texture diagnostics logged (render thread)
     std::mutex dirty_mutex_;
     std::vector<uint64_t> dirty_queue_;
     std::atomic<bool> dirty_pending_{false};
@@ -3944,6 +3966,9 @@ private:
         if (!c.copy) return;
         const CopyInfo& ci = *c.copy;
         Image* img = GetImage(ci.dst, false);
+        if (IsWatchedTexture(ci.dst.addr) && watch_logs_++ < 40)
+            LOGI(kTag, "face texture diagnostics: buffer @%llx -> texture @%llx (list %llu)", (unsigned long long)c.src_addr,
+                 (unsigned long long)ci.dst.addr, (unsigned long long)list_counter_);
         if (!img || IsDepthFormat(img->nvn_format)) return;
         const FormatInfo fi = GetFormatInfo(img->nvn_format);
         const CopyRegion& r = ci.dst_region;
@@ -4186,6 +4211,9 @@ private:
                 a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
                 c->attach_unsynced = true;
                 c->attach_gen++;
+                if (c->attached_list != list_counter_ && IsWatchedTexture(c->addr) && watch_logs_++ < 40)
+                    LOGI(kTag, "face texture diagnostics: @%llx is render target %zu (list %llu)", (unsigned long long)c->addr,
+                         ci, (unsigned long long)list_counter_);
                 c->attached_list = list_counter_;
                 NoteWritten(c);
                 c->written = true;
