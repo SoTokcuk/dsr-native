@@ -31,6 +31,10 @@ struct RuntimeConfig {
     int display_hz = 60;          // the screen's highest refresh rate at its resolution (from the activity)
     bool async_pipelines = true;  // compile new GPU pipelines off the render thread (no hitch; the draw waits a frame)
     bool auto_capture = false;    // diagnostics: save a few frame captures automatically during play
+    // detailed_logs (settings menu "Detailed diagnostic files", off by default): on = also the logcat mirror, the
+    // shader dump, auto_capture, and every file kept; off = only the run log (Info level), and only the 10 newest
+    // starts' log files kept in Download/DSRNative/logs.
+    bool detailed_logs = false;
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
     float gamma = 1.0f;           // extra display gamma applied through the game's brightness ramp (> 1 lifts shadows)
     std::string present_mode = "fifo";  // swapchain present mode: fifo (vsync, default), mailbox, fifo_relaxed, immediate (FIFO if unsupported)

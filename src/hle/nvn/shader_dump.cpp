@@ -9,6 +9,7 @@
 
 #include "common/log.h"
 #include "common/platform.h"
+#include "runtime/runtime.h"
 
 namespace dsr::hle::nvn {
 namespace {
@@ -39,6 +40,8 @@ bool WriteAll(int fd, const void* p, size_t n) {
 
 void DumpShader(uint64_t code_address, const void* code, size_t code_size, const void* control, size_t control_size) {
     if (!code || !code_size) return;
+    // Only with Detailed diagnostic files on (settings menu; detailed_logs): a dump per start adds up on the phone.
+    if (!dsr::GetRuntime().config.detailed_logs) return;
     uint64_t key = Fnv1a(code, code_size);
     if (control) key = Fnv1a(control, control_size, key);
     std::lock_guard<std::mutex> lk(g_mutex);

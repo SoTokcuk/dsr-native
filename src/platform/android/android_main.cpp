@@ -242,6 +242,61 @@ int CreateUserFileImpl(const char* name, const char* mime_type) {
     return fd;
 }
 
+// The run log's start time (names the logcat file) and whether it went through MediaStore (Download/DSRNative/logs).
+tm g_log_time{};
+bool g_log_via_media_store = false;
+
+// After the settings are read (detailed_logs, see RuntimeConfig). Detailed: the logcat mirror is started (its file
+// named after the run log). Standard: Info-level logging, and old files in the logs folder are removed, keeping the
+// 10 newest starts' run logs, logcat files and shader dumps (frame captures are left alone: the player made them).
+void ApplyLogMode(android_app* app, const dsr::RuntimeConfig& cfg, const std::string& base) {
+    if (cfg.detailed_logs) {
+        LOGI(kTag, "detailed diagnostic files on: logcat mirror, shader dump%s, all log files kept",
+             cfg.auto_capture ? ", automatic frame captures" : "");
+        if (!g_log_via_media_store) return;
+        char logcat_name[80];
+        strftime(logcat_name, sizeof(logcat_name), "dsr_%Y%m%d_%H%M%S_logcat.txt", &g_log_time);
+        std::string why;
+        int lfd = CreateDownloadViaMediaStore(app, logcat_name, &why);
+        if (lfd >= 0) {
+            LOGI(kTag, "logcat file: Download/DSRNative/logs/%s", logcat_name);
+            StartLogcatMirror(lfd);
+        } else {
+            LOGW(kTag, "logcat file not created: %s", why.c_str());
+        }
+        return;
+    }
+    LOGI(kTag, "standard log files (Detailed diagnostic files off in the settings menu): this log only, at Info level");
+    dsr::SetLogLevel(dsr::LogLevel::Info);
+    // Our files are dsr_<yyyymmdd>_<hhmmss>[...]: the time stamp sorts them. Keep those of the 10 newest run logs.
+    const std::string dir = base + "/logs";
+    DIR* d = opendir(dir.c_str());
+    if (!d) return;
+    std::vector<std::string> runs, files;
+    while (dirent* e = readdir(d)) {
+        const std::string n = e->d_name;
+        int ymd, hms;
+        char tail[16];
+        if (sscanf(n.c_str(), "dsr_%8d_%6d%15s", &ymd, &hms, tail) == 3 && !strcmp(tail, ".txt")) runs.push_back(n);
+        if (n.rfind("dsr_", 0) == 0 && n.rfind("dsr_frame_", 0) != 0 &&
+            (n.size() > 4 && (n.compare(n.size() - 4, 4, ".txt") == 0 || n.compare(n.size() - 4, 4, ".bin") == 0)))
+            files.push_back(n);
+    }
+    closedir(d);
+    constexpr size_t kKeep = 10;
+    if (runs.size() <= kKeep) return;
+    std::sort(runs.begin(), runs.end());
+    const std::string cutoff = runs[runs.size() - kKeep].substr(4, 15);  // yyyymmdd_hhmmss of the oldest kept
+    int removed = 0;
+    for (const std::string& n : files) {
+        // dsr_<stamp>... and dsr_shaders_<stamp>...: compare the stamp.
+        const size_t at = n.rfind("dsr_shaders_", 0) == 0 ? 12 : 4;
+        if (n.size() < at + 15 || n.compare(at, 15, cutoff) >= 0) continue;
+        if (unlink((dir + "/" + n).c_str()) == 0) removed++;
+    }
+    if (removed) LOGI(kTag, "removed %d old log file(s) from %s (the 10 newest starts' are kept)", removed, dir.c_str());
+}
+
 void SetupLogFile(android_app* app) {
     g_app_for_files = app;
     dsr::platform::SetCreateUserFile(&CreateUserFileImpl);
@@ -258,16 +313,8 @@ void SetupLogFile(android_app* app) {
     if (fd >= 0) {
         dsr::SetLogFileFd(fd);
         LOGI(kTag, "log file: Download/DSRNative/logs/%s (via MediaStore)", name);
-        char logcat_name[80];
-        strftime(logcat_name, sizeof(logcat_name), "dsr_%Y%m%d_%H%M%S_logcat.txt", &t);
-        std::string why2;
-        int lfd = CreateDownloadViaMediaStore(app, logcat_name, &why2);
-        if (lfd >= 0) {
-            LOGI(kTag, "logcat file: Download/DSRNative/logs/%s", logcat_name);
-            StartLogcatMirror(lfd);
-        } else {
-            LOGW(kTag, "logcat file not created: %s", why2.c_str());
-        }
+        g_log_time = t;
+        g_log_via_media_store = true;
         return;
     }
     failures.push_back("MediaStore Download/DSRNative/logs: " + why);
@@ -400,6 +447,12 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                     "# auto_capture: 1 = save a few frame captures (dsr_frame_*.bin) during play, for diagnostics\n"
                     "# (pressing both sticks in, L3 + R3, always saves one)\n"
                     "auto_capture = %d\n"
+                    "# detailed_logs: 1 = also write the logcat mirror, a shader dump and (with auto_capture) frame\n"
+                    "# captures, and keep every log file; 0 = one log per start, the 10 newest starts' files kept\n"
+                    "detailed_logs = 0\n"
+                    "# keep_alive: 1 = a \"DSR Native is running\" notification while the game runs, so Android closes\n"
+                    "# the game in the background far less often; 0 = off\n"
+                    "keep_alive = 1\n"
                     "# profile: 1 = log where the CPU time goes every 10 s (diagnostics, costs ~1%%)\n"
                     "profile = %d\n"
                     "# gamma: extra display gamma on top of the in-game brightness (1.0 = as the game draws it;\n"
@@ -455,6 +508,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             } else if (!strcmp(key, "min_fps")) cfg->min_fps = std::clamp(v, 15, 30);
             else if (!strcmp(key, "async_pipelines")) cfg->async_pipelines = v != 0;
             else if (!strcmp(key, "auto_capture")) cfg->auto_capture = v != 0;
+            else if (!strcmp(key, "detailed_logs")) cfg->detailed_logs = v != 0;
             else if (!strcmp(key, "profile")) cfg->profile = v != 0;
             else if (!strcmp(key, "pin_render_thread")) cfg->pin_render_thread = v != 0;
             else if (!strcmp(key, "record_thread")) cfg->record_thread = v != 0;
@@ -1333,6 +1387,7 @@ void StartGame(android_app* app) {
         mkdir(cfg.cheats_dir.c_str(), 0775);
         cfg.display_hz = CallActivityStaticInt(app, "displayMaxHz", 60);
         LoadSettings(st.base + "/settings.txt", &cfg);
+        ApplyLogMode(app, cfg, st.base);
         if (app->window) {
             const int ww = ANativeWindow_getWidth(app->window), wh = ANativeWindow_getHeight(app->window);
             if (ww > 0 && wh > 0) cfg.screen_aspect = float(std::max(ww, wh)) / float(std::min(ww, wh));

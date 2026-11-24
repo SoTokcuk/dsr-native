@@ -1063,7 +1063,9 @@ public:
             LOGI(kTag, "frame capture (requested): recording this frame's passes");
             return;
         }
-        if (captures_done_ >= 6 || !dsr::GetRuntime().config.auto_capture) return;
+        // Automatic captures only with Detailed diagnostic files on (L3 + R3 captures are always made).
+        if (captures_done_ >= 6 || !dsr::GetRuntime().config.auto_capture || !dsr::GetRuntime().config.detailed_logs)
+            return;
         if (!capture_clock_started_) {
             if (last_list_draws_ < 100) return;  // wait for real 3D frames
             capture_clock_started_ = true;

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar icon of the "DSR Native is running" notification: a small flame (white; Android tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2C12,2 6,8.5 6,13.5C6,17.1 8.7,20 12,20C15.3,20 18,17.1 18,13.5C18,10.6 16.2,8.4 15,7.2C15,9.2 14,10.6 12.8,11.2C13.3,8.2 12,4.6 12,2ZM12,13C12,13 10,15 10,16.6C10,17.9 10.9,18.8 12,18.8C13.1,18.8 14,17.9 14,16.6C14,15 12,13 12,13Z" />
+</vector>

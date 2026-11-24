@@ -543,6 +543,12 @@ public class GameActivity extends NativeActivity {
     }
 
     @Override
+    protected void onDestroy() {
+        KeepAliveService.apply(this, false);  // the notification goes with the game
+        super.onDestroy();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         // Back from the "All files access" settings screen: on, the game starts; still off, asked again.

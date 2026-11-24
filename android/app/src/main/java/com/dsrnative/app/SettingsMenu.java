@@ -97,6 +97,7 @@ public final class SettingsMenu {
         TouchControls.sRecenter = !"0".equals(v.get("touch_camera_recenter"));
         TouchControls.setLayout(v.get("touch_layout"));
         if ("1".equals(v.get("fps_counter"))) FpsCounter.apply(activity, true);
+        if (!"0".equals(v.get("keep_alive"))) KeepAliveService.apply(activity, true);  // on unless turned off
         showFirstLaunchTip(activity);
     }
 
@@ -581,6 +582,9 @@ public final class SettingsMenu {
     private void buildSettingsTab() {
         section(Strings.t("sec_game"));
         toggle("skip_intro", Strings.t("skip_t"), Strings.t("skip_n"), "1", "0", "0");
+        toggle("keep_alive", Strings.t("keep_t"), Strings.t("keep_n") + " " + Strings.t("changes_now"), "1", "0", "1");
+        toggle("detailed_logs", Strings.t("logs_t"), Strings.t("logs_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
 
         section(Strings.t("sec_controls"));
         toggle("face_buttons", Strings.t("swap_t"), Strings.t("swap_n") + " " + Strings.t("changes_now"),
@@ -1371,6 +1375,11 @@ public final class SettingsMenu {
         }
         if (key.equals("fps_counter")) {
             FpsCounter.apply(mA, "1".equals(value));
+            now = true;
+        } else if (key.equals("keep_alive")) {
+            boolean on = "1".equals(value);
+            KeepAliveService.apply(mA, on);
+            if (on) KeepAliveService.askNotificationPermission(mA);
             now = true;
         } else if (key.equals("touch_camera_recenter")) {
             TouchControls.sRecenter = !"0".equals(value);
