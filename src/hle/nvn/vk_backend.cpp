@@ -4986,6 +4986,12 @@ private:
                 }
             }
         }
+        // Camera motion (skip_hidden Gentle, temporal smoothing): sampled from the frame's first opaque, depth-tested
+        // world draw with a colour target (OccCamera).
+        if ((dsr::GetRuntime().config.skip_hidden || dsr::GetRuntime().config.fsr >= 2) && occ_cam_frame_ != occ_frame_ &&
+            !colors.empty() && colors[0] && depth && depth->width >= 256 && st_.depth.depth_test &&
+            st_.color.blend_enable == 0 && !capture_active_)
+            OccCamera();
         // ---- skip_hidden (experimental; from PR #47): world draws that covered no pixel lately are left out ----------
         uint64_t occ_key = 0;
         bool occ_query = false;
@@ -6992,6 +6998,10 @@ private:
                  "copy, %llu frames shown without (a later draw needed the frame's depth buffer)",
                  (unsigned long long)sharp_draws_, (unsigned long long)sharp_restarts_, (unsigned long long)sharp_dropped_);
         sharp_draws_ = sharp_restarts_ = sharp_dropped_ = 0;
+        if (dsr::GetRuntime().config.fsr >= 2 && post_temporal_frames_)
+            LOGI(kTag, "temporal smoothing: %llu frames in the last 10 s with the history reduced or off (camera moving)",
+                 (unsigned long long)post_temporal_moving_);
+        post_temporal_moving_ = 0;
         if (dsr::GetRuntime().config.shadow_quality == 0)
             LOGI(kTag, "shadow_quality 0: %llu shadow map draws left out (last 10 s)", (unsigned long long)shadow_draws_skipped_);
         shadow_draws_skipped_ = 0;
@@ -7514,7 +7524,7 @@ private:
     int post_hist_w_ = 0;
     bool post_hist_valid_ = false;
     std::chrono::steady_clock::time_point post_hist_last_{};
-    uint64_t post_temporal_frames_ = 0;
+    uint64_t post_temporal_frames_ = 0, post_temporal_moving_ = 0;
     VkSampler post_sampler_ = VK_NULL_HANDLE;
     std::vector<PostPipe> post_pipes_;
     bool post_ready_ = false, post_failed_ = false, fsr_ready_ = false;
@@ -7852,8 +7862,15 @@ private:
         Image& prev = post_hist_[post_hist_w_ ^ 1];
         // inv_out, neighbourhood spacing (the enlargement: taps one source pixel apart), reset, history weight at rest.
         const float spacing = std::max(1.0f, float(cur.width) / float(std::max(1, sharp_rw_)));
+        // The history is only trusted while the camera is still: without motion vectors a turning view blends
+        // mismatched frames (soft, blurry). While it moves (OccCamera) the weight is 0 (the frame as it is, which also
+        // keeps the history current) and it eases back to 0.875 over kTemporalEase frames once the view rests.
+        constexpr uint32_t kTemporalEase = 8;
+        const float rest = float(std::min(occ_still_, kTemporalEase)) / float(kTemporalEase);
+        const float w_hist = 0.875f * rest;
+        if (w_hist < 0.875f) post_temporal_moving_++;
         const uint32_t push[8] = {FloatBits(1.0f / float(cur.width)), FloatBits(1.0f / float(cur.height)),
-                                  FloatBits(spacing), FloatBits(reset ? 1.0f : 0.0f), FloatBits(0.875f), 0, 0, 0};
+                                  FloatBits(spacing), FloatBits(reset ? 1.0f : 0.0f), FloatBits(w_hist), 0, 0, 0};
         if (!PostPass(kPostTemporal, cur, out, push, 8, &prev)) return nullptr;
         post_hist_w_ ^= 1;
         post_hist_valid_ = true;
