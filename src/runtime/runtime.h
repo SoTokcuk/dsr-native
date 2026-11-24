@@ -75,6 +75,11 @@ struct RuntimeConfig {
     // (4x smaller than RGBA8, but lossier: off by default).
     bool bc_etc2 = true;
     bool bc3_etc2 = false;
+    // bc_astc (experimental; encoder from pull request #47 by fernanfez00): on GPUs with ASTC (Mali) BC1 / BC3 textures
+    // are re-encoded as ASTC and BC5 normal maps as ASTC luminance + alpha, instead of ETC2 / decoded RGBA8.
+    // astc_block: 4, 6 or 8 (world textures; the HUD, text and small textures stay 4x4).
+    bool bc_astc = false;
+    int astc_block = 4;
     // Diagnostics. shadow_compare: how the shadow map lookups compare (0 = the game's function as Vulkan's;
     // 1 = operands swapped; 2 = always 1 (shadowed); 3 = always 0 (lit)).
     int shadow_compare = 0;

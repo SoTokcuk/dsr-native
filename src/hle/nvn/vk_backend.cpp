@@ -47,6 +47,7 @@
 #include "common/platform.h"
 #include "hle/nvn/backend.h"
 #include "hle/nvn/bc_decode.h"
+#include "hle/nvn/astc_encode.h"
 #include "hle/nvn/etc_encode.h"
 #include "hle/nvn/parallel.h"
 #include "runtime/runtime.h"
@@ -136,6 +137,12 @@ VkFormat SrgbTwin(VkFormat f) {
         case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
         case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
         case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+        case VK_FORMAT_ASTC_4x4_UNORM_BLOCK: return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+        case VK_FORMAT_ASTC_4x4_SRGB_BLOCK: return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        case VK_FORMAT_ASTC_6x6_UNORM_BLOCK: return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+        case VK_FORMAT_ASTC_6x6_SRGB_BLOCK: return VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
+        case VK_FORMAT_ASTC_8x8_UNORM_BLOCK: return VK_FORMAT_ASTC_8x8_SRGB_BLOCK;
+        case VK_FORMAT_ASTC_8x8_SRGB_BLOCK: return VK_FORMAT_ASTC_8x8_UNORM_BLOCK;
         case VK_FORMAT_BC1_RGB_UNORM_BLOCK: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
         case VK_FORMAT_BC1_RGB_SRGB_BLOCK: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
@@ -393,10 +400,22 @@ VkFormat BcDecodedFormat(int f) {
     }
 }
 
-// What a BC texture becomes on a GPU without BC support: decoded (RGBA8, R8, RG8, RGBA16F) or re-encoded as ETC2.
-enum class BcTo : uint8_t { Decoded, Etc2, Etc2Rgba8 };
-VkFormat ConvertedFormat(int f, BcTo to) {
+// What a BC texture becomes on a GPU without BC support: decoded (RGBA8, R8, RG8, RGBA16F), re-encoded as ETC2, or
+// (settings bc_astc, experimental; encoder from pull request #47 by fernanfez00) as ASTC: BC1 / BC3 as RGBA, BC5 as
+// luminance + alpha (dual plane), with astc_block x astc_block blocks.
+enum class BcTo : uint8_t { Decoded, Etc2, Etc2Rgba8, Astc, AstcLa };
+int AstcBlock() { return AstcBlockDim(dsr::GetRuntime().config.astc_block); }
+VkFormat AstcFormat(int block, bool srgb) {
+    switch (block) {
+        case 6: return srgb ? VK_FORMAT_ASTC_6x6_SRGB_BLOCK : VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
+        case 8: return srgb ? VK_FORMAT_ASTC_8x8_SRGB_BLOCK : VK_FORMAT_ASTC_8x8_UNORM_BLOCK;
+        default: return srgb ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    }
+}
+VkFormat ConvertedFormat(int f, BcTo to, int astc_block = 0) {  // astc_block 0: settings astc_block
     const bool srgb = f == 69 || f == 70 || f == 71 || f == 72 || f == 78;
+    if (to == BcTo::Astc && IsAstcEncodable(f)) return AstcFormat(astc_block ? astc_block : AstcBlock(), srgb);
+    if (to == BcTo::AstcLa && IsAstcLaEncodable(f)) return AstcFormat(astc_block ? astc_block : AstcBlock(), false);
     if (to == BcTo::Etc2 && IsEtcEncodable(f)) {
         if (EtcHasPunchThrough(f)) return srgb ? VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
         return srgb ? VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK : VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
@@ -563,6 +582,7 @@ struct Image {
     bool fragdepth_written = false;
     BcKind bc = BcKind::None;  // block-compressed texture converted on upload (GPU without BC support)
     BcTo bc_to = BcTo::Decoded;  // ... into what
+    int astc_block = 4;          // ... block size when that is ASTC (settings astc_block; 4 for HUD / small textures)
     bool storage = false;      // created with VK_IMAGE_USAGE_STORAGE_BIT
     bool mutable_fmt = false;  // created with VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT (views in `twin` allowed)
     uint64_t attach_gen = 0;  // times attached to a render pass (`hole_test` 16 copies)
@@ -1565,6 +1585,7 @@ private:
         VkPhysicalDeviceFeatures en{};
         en.textureCompressionBC = have.features.textureCompressionBC;
         en.textureCompressionETC2 = have.features.textureCompressionETC2;
+        en.textureCompressionASTC_LDR = have.features.textureCompressionASTC_LDR;
         en.samplerAnisotropy = have.features.samplerAnisotropy;
         en.shaderImageGatherExtended = have.features.shaderImageGatherExtended;
         en.fillModeNonSolid = have.features.fillModeNonSolid;
@@ -1657,6 +1678,11 @@ private:
             begin_rendering_ = reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(device_, "vkCmdBeginRendering"));
             end_rendering_ = reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(device_, "vkCmdEndRendering"));
         }
+        if (dsr::GetRuntime().config.bc_astc)
+            LOGI(kTag, "settings bc_astc = 1 (experimental): %s", features_.textureCompressionASTC_LDR
+                     ? (features_.textureCompressionBC ? "the GPU samples BC textures itself: ASTC not needed"
+                                                       : "BC textures re-encoded as ASTC (BC5 as luminance + alpha)")
+                     : "the GPU has no ASTC textures: ETC2 / decoded as before");
         mali_barriers_ = dsr::GetRuntime().config.mali_barriers;
         if (mali_barriers_)
             LOGI(kTag, "settings mali_barriers = 1: narrow layout barriers, render targets readable when their pass ends");
@@ -2174,6 +2200,16 @@ private:
     // 4x4 block; decoded RGBA8 is 4x larger), which saves memory and texture bandwidth on Mali.
     BcTo BcTarget(int nvn_format) {
         const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
+        // bc_astc (experimental): BC1 / BC3 as ASTC RGBA and BC5 (normal maps) as ASTC luminance + alpha when the GPU
+        // has ASTC (all Mali GPUs); a format it cannot take falls through to the choices below.
+        if (c.bc_astc && features_.textureCompressionASTC_LDR &&
+            (IsAstcEncodable(nvn_format) || IsAstcLaEncodable(nvn_format))) {
+            const BcTo to = IsAstcLaEncodable(nvn_format) ? BcTo::AstcLa : BcTo::Astc;
+            VkFormatProperties p;
+            vkGetPhysicalDeviceFormatProperties(phys_, ConvertedFormat(nvn_format, to), &p);
+            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            if ((p.optimalTilingFeatures & need) == need) return to;
+        }
         if (!features_.textureCompressionETC2 || !c.bc_etc2) return BcTo::Decoded;
         BcTo to = BcTo::Decoded;
         if (IsEtcEncodable(nvn_format)) to = BcTo::Etc2;
@@ -2218,7 +2254,14 @@ private:
                 chosen = f;
                 feats = p.optimalTilingFeatures;
                 LOGI(kTag, "NVN format %d (block-compressed) not supported by the GPU: %s on upload (Vulkan format %d)",
-                     nvn_format, to == BcTo::Decoded ? "decoded" : "re-encoded as ETC2", int(f));
+                     nvn_format,
+                     to == BcTo::Decoded ? "decoded"
+                     : to == BcTo::Astc  ? (AstcBlock() > 4 ? "re-encoded as ASTC (world textures at the astc_block size, "
+                                                             "the HUD, text and small textures 4x4)"
+                                                           : "re-encoded as ASTC 4x4")
+                     : to == BcTo::AstcLa ? "re-encoded as ASTC luminance + alpha (dual plane)"
+                                          : "re-encoded as ETC2",
+                     int(f));
                 if (BcKindOf(nvn_format) == BcKind::BC7 || BcKindOf(nvn_format) == BcKind::BC6H_S ||
                     BcKindOf(nvn_format) == BcKind::BC6H_U)
                     LOGW(kTag, "NVN format %d: decoding not implemented yet, shown as grey", nvn_format);
@@ -2498,7 +2541,7 @@ private:
         img.tex = t.tex;
         img.vk_format = vf;
         if (BcKindOf(t.tex.format) != BcKind::None)  // a BC texture in a format the GPU has instead: converted
-            for (BcTo to : {BcTo::Etc2, BcTo::Etc2Rgba8, BcTo::Decoded})
+            for (BcTo to : {BcTo::Astc, BcTo::AstcLa, BcTo::Etc2, BcTo::Etc2Rgba8, BcTo::Decoded})
                 if (vf == ConvertedFormat(t.tex.format, to) && (to == BcTo::Decoded || vf != BcDecodedFormat(t.tex.format))) {
                     img.bc = BcKindOf(t.tex.format);
                     img.bc_to = to;
@@ -2508,6 +2551,26 @@ private:
         img.height = t.tex.height;
         img.levels = std::max(1, std::min(t.tex.levels, int(layout.levels.size())));
         img.layers = std::max(1, layout.layers);
+        // astc_block 6 / 8 is for the game's world art: textures with a long mip chain. The HUD, menus and text
+        // (a single level: atlases, fonts, icons, backgrounds) and small textures stay 4x4, where they stay sharp.
+        if (img.bc != BcKind::None && (img.bc_to == BcTo::Astc || img.bc_to == BcTo::AstcLa)) {
+            int blk = AstcBlock();
+            const bool world_art = img.levels >= 4 && std::min(t.tex.width, t.tex.height) >= 128 &&
+                                   t.tex.target != kTarget3D && t.tex.target != kTarget1D && t.tex.target != kTarget1DArray;
+            if (blk > 4 && !world_art) blk = 4;
+            img.astc_block = blk;
+            if (blk != AstcBlock()) {
+                const VkFormat bf = ConvertedFormat(t.tex.format, img.bc_to, blk);
+                VkFormatProperties bp;
+                vkGetPhysicalDeviceFormatProperties(phys_, bf, &bp);
+                if (bp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) {
+                    vf = bf;
+                    img.vk_format = vf;
+                } else {
+                    img.astc_block = AstcBlock();
+                }
+            }
+        }
         // texture_mip_skip: big BC textures (the game's art; never drawn into) without their most detailed level.
         if (mip_skip_ && BcKindOf(t.tex.format) != BcKind::None && img.levels >= 2 && t.tex.width >= 512 &&
             t.tex.height >= 512 && t.tex.target != kTarget3D && t.tex.target != kTarget1D &&
@@ -2606,6 +2669,8 @@ private:
         switch (img.bc_to) {
             case BcTo::Etc2: return EtcLevelBytes(w, h, d);
             case BcTo::Etc2Rgba8: return EtcRgba8LevelBytes(w, h, d);
+            case BcTo::Astc:
+            case BcTo::AstcLa: return AstcLevelBytes(w, h, d, img.astc_block);
             default: return size_t(w) * size_t(h) * size_t(d) * size_t(BcDecodedBytes(img.bc));
         }
     }
@@ -2623,7 +2688,8 @@ private:
         int bx, brows, w, h, depth;
         uint8_t* out;
         size_t out_bytes;
-        uint64_t key;  // ETC2 cache key (0: not cached)
+        uint64_t key;  // ETC2 / ASTC cache key (0: not cached)
+        int astc;      // ASTC block size (4, 6, 8) when `to` is ASTC
     };
     struct BcTask {
         uint32_t job;
@@ -2648,6 +2714,7 @@ private:
         const size_t slice = j.out_bytes / size_t(std::max(1, j.depth));
         uint8_t* out = j.out + size_t(k.z) * slice;
         const int bxn = (j.w + 3) / 4;
+        const int ab = AstcBlockDim(j.astc), abx = (j.w + ab - 1) / ab;  // ASTC block size, and blocks per row
         switch (j.to) {
             case BcTo::Decoded:
                 BcDecode(j.kind, blocks, j.bx, k.rows, out + size_t(y0) * size_t(j.w) * size_t(BcDecodedBytes(j.kind)),
@@ -2662,13 +2729,28 @@ private:
                 else
                     EncodeEtc2Rgba8(out + size_t(k.row0) * size_t(bxn) * 16, rgba.data(), j.w, hh, 1, quick);
                 break;
+            case BcTo::Astc:
+                rgba.resize(size_t(j.w) * size_t(hh) * 4);
+                BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
+                EncodeAstc(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                break;
+            case BcTo::AstcLa:  // BC5: decoded to two channels (R8G8), encoded as luminance + alpha
+                rgba.resize(size_t(j.w) * size_t(hh) * 2);
+                BcDecode(j.kind, blocks, j.bx, k.rows, rgba.data(), j.w, hh);
+                EncodeAstcLA(out + size_t(y0 / ab) * size_t(abx) * 16, rgba.data(), j.w, hh, 1, ab);
+                break;
         }
     }
     static void MakeTasks(const std::vector<BcJob>& jobs, std::vector<BcTask>* tasks) {
         tasks->clear();
         for (uint32_t j = 0; j < jobs.size(); j++) {
             const BcJob& job = jobs[j];
-            const int band = std::max(2, 4096 / std::max(1, job.bx));  // ~4096 blocks per task
+            int band = std::max(2, 4096 / std::max(1, job.bx));  // ~4096 blocks per task
+            if (job.to == BcTo::Astc || job.to == BcTo::AstcLa) {
+                // A task writes whole ASTC block rows: its bands are a multiple of lcm(4, block) texel rows.
+                const int unit = AstcBlockDim(job.astc) == 6 ? 3 : AstcBlockDim(job.astc) == 8 ? 2 : 1;  // BC block rows
+                band = (band + unit - 1) / unit * unit;
+            }
             for (int z = 0; z < job.depth; z++)
                 for (int r = 0; r < job.brows && r * 4 < job.h; r += band)
                     tasks->push_back({j, z, r, std::min(band, job.brows - r)});
@@ -2903,11 +2985,12 @@ private:
                     VkDeviceSize off = StreamAlloc(out_bytes, 16);
                     BcJob job{img.bc, img.bc_to, EtcHasPunchThrough(img.nvn_format), blocks,
                               int(l.row_bytes / std::max(1, fi.bytes_per_block)), int(l.rows), w, h, l.depth,
-                              stream_ptr_ + off, out_bytes, 0};
+                              stream_ptr_ + off, out_bytes, 0, img.astc_block};
                     bool cached = false;
                     if (img.bc_to != BcTo::Decoded) {
                         job.key = HashStep(Fnv(blocks, n), uint64_t(img.nvn_format) << 48 ^ uint64_t(w) << 24 ^
-                                                               uint64_t(h) ^ uint64_t(l.depth) << 40) | 1;
+                                                               uint64_t(h) ^ uint64_t(l.depth) << 40 ^
+                                                               uint64_t(img.bc_to) << 56 ^ uint64_t(img.astc_block) << 60) | 1;
                         auto hit = etc_cache_.find(job.key);
                         if (hit != etc_cache_.end() && hit->second.size() == out_bytes) {
                             memcpy(job.out, hit->second.data(), out_bytes);
@@ -2973,7 +3056,7 @@ private:
     VkFormat ViewFormat(const Image& img, int view_nvn) {
         if (!view_nvn || view_nvn == img.nvn_format) return VK_FORMAT_UNDEFINED;
         if (img.bc != BcKind::None && BcKindOf(view_nvn) != BcKind::None) {  // converted: compare converted formats
-            const VkFormat f = ConvertedFormat(view_nvn, img.bc_to);
+            const VkFormat f = ConvertedFormat(view_nvn, img.bc_to, img.astc_block);
             if (f == img.vk_format) return VK_FORMAT_UNDEFINED;
             if (f == img.twin && f != VK_FORMAT_UNDEFINED) return f;
         }
@@ -3009,7 +3092,12 @@ private:
         ci.image = img.image;
         ci.viewType = type;
         ci.format = format != VK_FORMAT_UNDEFINED ? format : img.vk_format;
-        ci.components = {Swizzle(swz[0]), Swizzle(swz[1]), Swizzle(swz[2]), Swizzle(swz[3])};
+        uint8_t sw[4] = {swz[0], swz[1], swz[2], swz[3]};
+        if (img.bc != BcKind::None && img.bc_to == BcTo::AstcLa) {
+            // BC5 stored as ASTC luminance + alpha reads as (L, L, L, A); BC5 reads as (R, G, 0, 1): R from L, G from A.
+            for (uint8_t& c : sw) c = c == 3 ? 5 : c == 4 ? 0 : c == 5 ? 1 : c;
+        }
+        ci.components = {Swizzle(sw[0]), Swizzle(sw[1]), Swizzle(sw[2]), Swizzle(sw[3])};
         ci.subresourceRange = {aspect, base_level, levels, base_layer, layers};
         VkImageView v = VK_NULL_HANDLE;
         if (vkCreateImageView(device_, &ci, nullptr, &v) != VK_SUCCESS) {
