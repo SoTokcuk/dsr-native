@@ -48,6 +48,10 @@
 #include "hle/nvn/backend.h"
 #include "hle/nvn/bc_decode.h"
 #include "hle/nvn/astc_encode.h"
+#include "hle/nvn/postfx_spv.h"
+#ifdef DSR_HAVE_FSR1
+#include "fsr1_spv.h"  // generated at build time from src/hle/nvn/shaders (cmake/build_fsr1_spv.cmake)
+#endif
 #include "hle/nvn/etc_encode.h"
 #include "hle/nvn/parallel.h"
 #include "runtime/runtime.h"
@@ -1376,6 +1380,13 @@ public:
         std::lock_guard<std::mutex> lk(m_);
         if (!EnsureDevice()) return;
         ReportDraws();
+        occ_frame_++;
+        // skip_hidden: keys of draws the game no longer issues (streamed geometry gets new addresses) go.
+        if (occ_state_.size() > 12000 && (occ_frame_ & 127) == 0)
+            for (auto it = occ_state_.begin(); it != occ_state_.end();) {
+                if (it->second.last_seen + 600 < occ_frame_) it = occ_state_.erase(it);
+                else ++it;
+            }
         // The frame rate cap changed while the game runs (settings menu): tell the display.
         if (window_ && swapchain_ && window_fps_ && window_fps_ != dsr::FixedFps(dsr::GetRuntime().config))
             SetWindowFrameRate();
@@ -1655,18 +1666,21 @@ private:
             LOGI(kTag, "aspect ratio: HUD and menus drawn in a centred %dx%d box of the %dx720 frame", hud_box_w_,
                  hud_box_h_, rw);
         }
-        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud) {
+        // FXAA and FSR 1 work on the screen-sized image too (the 3D picture is enlarged into it), so either turns it on.
+        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud || rc.fxaa || rc.fsr) {
             const int rw = rc.render_width, rh = rc.render_height;
-            const int target_h = std::min(rc.screen_height > 0 ? rc.screen_height : 1080, 1080);
-            if (rc.render_scale >= 0.999f) {
+            const bool postfx = rc.fxaa || rc.fsr;
+            const int target_h = std::max(std::min(rc.screen_height > 0 ? rc.screen_height : 1080, 1080), postfx ? rh : 0);
+            if (rc.render_scale >= 0.999f && !postfx) {
                 LOGI(kTag, "sharp_hud: off at a 100%% render resolution (only used below it)");
-            } else if (rw > 0 && rh > 0 && target_h > rh) {
+            } else if (rw > 0 && rh > 0 && (target_h > rh || (postfx && target_h == rh))) {
                 sharp_rw_ = rw;
                 sharp_rh_ = rh;
                 sharp_h_ = target_h;
                 sharp_w_ = std::min(4096, int(std::lround(double(target_h) * rw / rh)) & ~1);
-                LOGI(kTag, "sharp_hud: the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d",
-                     rw, rh, sharp_w_, sharp_h_);
+                LOGI(kTag, "sharp_hud: the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d%s%s",
+                     rw, rh, sharp_w_, sharp_h_, rc.fxaa ? (rc.fxaa >= 2 ? ", FXAA quality" : ", FXAA fast") : "",
+                     rc.fsr ? ", FSR 1" : "");
             } else {
                 LOGI(kTag, "sharp_hud: off, the render size (%dx%d) is already as sharp as the screen allows (%d lines)", rw,
                      rh, target_h);
@@ -1722,6 +1736,12 @@ private:
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
                 qi.queryCount = 2;
                 if (vkCreateQueryPool(device_, &qi, nullptr, &sl.ts) != VK_SUCCESS) sl.ts = VK_NULL_HANDLE;
+            }
+            if (dsr::GetRuntime().config.skip_hidden) {
+                VkQueryPoolCreateInfo oi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                oi.queryType = VK_QUERY_TYPE_OCCLUSION;
+                oi.queryCount = kOccQueries;
+                if (vkCreateQueryPool(device_, &oi, nullptr, &sl.occ) != VK_SUCCESS) sl.occ = VK_NULL_HANDLE;
             }
             desc_pool_ = MakeDescriptorPool();
             if (!CreateStream() || !desc_pool_) return false;
@@ -1947,6 +1967,7 @@ private:
         if (!recording_) return;
         EndRendering();
         SubmitAndWait(VK_NULL_HANDLE, VK_NULL_HANDLE);
+        CollectOcclusion(slots_[slot_]);  // done on the GPU; the same slot's queries are reset by Begin
         recording_ = false;
         Begin();
         flushes_++;
@@ -2640,7 +2661,7 @@ private:
     void ReapRetired() {
         while (!retired_.empty() && retired_.front().seq <= completed_seq_) {
             Retired& r = retired_.front();
-            if (rp_fallback_) ForgetFramebuffers(r.views);
+            if (rp_fallback_ || post_ready_) ForgetFramebuffers(r.views);
             for (VkImageView v : r.views) vkDestroyImageView(device_, v, nullptr);
             if (r.image) vkDestroyImage(device_, r.image, nullptr);
             if (r.memory) vkFreeMemory(device_, r.memory, nullptr);
@@ -3204,7 +3225,9 @@ private:
             // The game's shadow lookups (GREATER) give the shadow amount: the shaders compute light as 1 - result *
             // strength, so 1 means shadowed (surface farther than the shadow map's texel), as in Vulkan.
             ci.compareOp = s.compare_mode ? CompareOp(s.compare_func) : VK_COMPARE_OP_LESS_OR_EQUAL;
-            switch (dsr::GetRuntime().config.shadow_compare) {  // diagnostics (settings shadow_compare)
+            // shadow_quality 0 (no shadows): every lookup answers "lit" (0: the shaders compute light as 1 - result).
+            if (dsr::GetRuntime().config.shadow_quality == 0) ci.compareOp = VK_COMPARE_OP_NEVER;
+            else switch (dsr::GetRuntime().config.shadow_compare) {  // diagnostics (settings shadow_compare)
                 case 1: ci.compareOp = s.compare_mode ? SwapCompareOperands(CompareOp(s.compare_func)) : VK_COMPARE_OP_GREATER_OR_EQUAL; break;
                 case 2: ci.compareOp = VK_COMPARE_OP_ALWAYS; break;
                 case 3: ci.compareOp = VK_COMPARE_OP_NEVER; break;
@@ -3241,6 +3264,8 @@ private:
         uint32_t count = 0, instances = 0, first_vertex = 0, base_instance = 0;
         int32_t vertex_offset = 0;
         uint32_t query = UINT32_MAX;  // occlusion query index (captures)
+        VkQueryPool occ_pool = VK_NULL_HANDLE;  // skip_hidden: the slot's occlusion pool and query index
+        uint32_t occ_q = UINT32_MAX;
         uint16_t n_vb = 0, n_tex = 0, n_ubo = 0;
     };
     // ======================================================================================================
@@ -3476,6 +3501,7 @@ private:
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             vkBeginCommandBuffer(cmd_, &bi);
+            if (VkQueryPool occ = slots_[i].occ) vkCmdResetQueryPool(cmd_, occ, 0, kOccQueries);
             if (VkQueryPool ts = slots_[i].ts) {
                 vkCmdResetQueryPool(cmd_, ts, 0, 2);
                 vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ts, 0);
@@ -3663,6 +3689,7 @@ private:
             WaitSlotFence(sl);
             DeliverReadbacks(sl);
             CollectGpuTime(sl);
+            CollectOcclusion(sl);
             vkResetFences(device_, 1, &sl.fence);
             sl.pending = false;
             completed_seq_ = std::max(completed_seq_, sl.seq);  // one queue: earlier submissions are done too
@@ -3683,6 +3710,7 @@ private:
             if (sl.pending) {
                 DeliverReadbacks(sl);
                 CollectGpuTime(sl);
+                CollectOcclusion(sl);
                 vkResetFences(device_, 1, &sl.fence);
                 sl.pending = false;
             }
@@ -3903,6 +3931,9 @@ private:
         if (st_.rts.size() <= size_t(st_.num_rt)) return;
         Image* img = GetImage(st_.rts[size_t(st_.num_rt)], false);
         if (!img) return;
+        // shadow_quality 0: nothing is drawn into the shadow map and its lookups answer "lit", so its clear is pointless
+        // (left pending it ended the open world pass at the next draw sampling the map). From PR #47.
+        if (dsr::GetRuntime().config.shadow_quality == 0 && shadow_maps_.count(ShadowMapKey(*img))) return;
         depth_gen_++;
         VkImageAspectFlags a = 0;
         if (c.depth_mask && HasDepth(img->nvn_format)) a |= VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -4823,6 +4854,22 @@ private:
                                        HasDepth(depth_peek->nvn_format) && st_.depth.depth_test && !st_.depth.depth_write &&
                                        st_.program[1] && st_.depth.depth_func != 8 && !debug_fx;
         if (shader_depth_test) fopt.depth_test_func = st_.depth.depth_func;
+        // shadow_quality 0 (from PR #47): the shadow map pass (depth only, square target, no colour target) is not
+        // drawn; its lookups are answered "lit" by the sampler (Sampler), so the map's contents do not matter. (The
+        // game binds 4 empty colour slots in that pass, and its alpha-tested casters have a fragment program.)
+        if (dsr::GetRuntime().config.shadow_quality == 0 && depth_peek && IsDepthFormat(depth_peek->nvn_format) &&
+            depth_peek->width == depth_peek->height && depth_peek->width >= 256 && depth_peek->width <= 2048) {
+            bool no_colour_target = true;
+            for (int i = 0; i < st_.num_rt && no_colour_target; i++)
+                if (GetImage(st_.rts[size_t(i)], false)) no_colour_target = false;
+            if (no_colour_target) {
+                if (shadow_maps_.insert(ShadowMapKey(*depth_peek)).second && shadow_skip_logged_++ < 4)
+                    LOGI(kTag, "shadow_quality 0: the shadow map pass (%dx%d) is not drawn", depth_peek->width,
+                         depth_peek->height);
+                shadow_draws_skipped_++;
+                return;
+            }
+        }
         Shader* vs = GetShader(*st_.program[0], vopt);
         // No pixel program: a depth-only pass (shadow maps, depth prepass). Draw with the vertex stage only.
         Shader* fs = st_.program[1] ? GetShader(*st_.program[1], fopt) : &no_fragment_;
@@ -4876,6 +4923,70 @@ private:
             while (!colors.empty() && !colors.back()) colors.pop_back();
         if (depth && !IsDepthFormat(depth->nvn_format)) depth = nullptr;
 
+        // ---- skip_prepass (experimental, for Mali; from PR #47): see PrepassStat ------------------------------------
+        struct ForceDepthWrite {
+            bool* p = nullptr;
+            ~ForceDepthWrite() {
+                if (p) *p = false;
+            }
+        } force_depth_write;
+        if (dsr::GetRuntime().config.skip_prepass && depth && depth->width >= 256 && st_.depth.depth_test &&
+            !st_.depth.stencil_test && !shader_depth_test && (st_.depth.depth_func == 2 || st_.depth.depth_func == 4) &&
+            !(st_.program[1] && fs->info.writes_depth) && !capture_active_) {
+            bool any_color = false;
+            for (Image* c : colors) any_color |= c != nullptr;
+            const bool colour_writes = any_color && (st_.channel.mask & 0xF) != 0;
+            const bool depth_only = !colour_writes && st_.depth.depth_write;
+            const bool main_like = colour_writes && !st_.depth.depth_write && st_.color.blend_enable == 0;
+            if (depth_only || main_like) {
+                PrepassStat& ps = prepass_[depth->addr];
+                if (ps.frame != occ_frame_) {
+                    ps.learned = ps.pre >= 16 && ps.matched >= 16 && uint64_t(ps.matched) * 10 >= uint64_t(ps.pre) * 8;
+                    ps.frame = occ_frame_;
+                    ps.pre = ps.main = ps.matched = 0;
+                }
+                if (prepass_keys_frame_ != occ_frame_) {
+                    prepass_keys_.clear();
+                    prepass_keys_frame_ = occ_frame_;
+                }
+                const uint64_t pkey = PrepassKey(p, depth->addr);
+                if (depth_only) {
+                    ps.pre++;
+                    if (prepass_keys_.size() < 8192) prepass_keys_.insert(pkey);
+                    if (ps.learned) {
+                        prepass_skipped_++;
+                        return;
+                    }
+                } else {
+                    ps.main++;
+                    const bool twin = prepass_keys_.count(pkey) != 0;
+                    if (twin) ps.matched++;
+                    if (ps.learned) {
+                        if (twin) {
+                            st_.depth.depth_write = true;  // restored when this draw is done (ForceDepthWrite)
+                            force_depth_write.p = &st_.depth.depth_write;
+                            prepass_converted_++;
+                        } else {
+                            prepass_unmatched_++;
+                        }
+                    }
+                }
+            }
+        }
+        // ---- skip_hidden (experimental; from PR #47): world draws that covered no pixel lately are left out ----------
+        uint64_t occ_key = 0;
+        bool occ_query = false;
+        if (dsr::GetRuntime().config.skip_hidden && !capture_active_ && OccCandidate(p, colors, depth, shader_depth_test) &&
+            OccKey(p, vin, uint32_t(depth->width), &occ_key)) {
+            occ_judged_++;
+            const int act = OccDecide(occ_key);
+            if (act == 2) {
+                occ_skipped_++;
+                return;
+            }
+            occ_query = act == 1;
+        }
+
         Begin();
         // Keep enough streaming space for this draw so nothing allocated below is lost to a flush.
         if (StreamRemaining() < (16ull << 20)) Flush();
@@ -4920,7 +5031,8 @@ private:
                             only ? "the depth / stencil buffer" : "more render targets");
                 }
             } else if (why) {
-                if (Image* sh = SharpStart(*colors[0])) {
+                // The final copy overwrites its target: what is there is only enlarged, without FXAA / FSR.
+                if (Image* sh = SharpStart(*colors[0], why[2] == 'H')) {
                     if (!active && sharp_diag_ < 16 &&
                         sharp_diag_keys_.insert(std::to_string(colors[0]->serial) + why).second) {
                         sharp_diag_++;
@@ -5497,6 +5609,16 @@ private:
         for (const VkVertexInputBindingDescription& b : vin.bindings)
             instanced |= b.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
         d.base_instance = instanced ? 0 : uint32_t(p.base_instance);
+        if (occ_query && recording_) {
+            Slot& osl = slots_[slot_];
+            if (osl.occ && osl.occ_used < kOccQueries) {
+                d.occ_pool = osl.occ;
+                d.occ_q = osl.occ_used++;
+                osl.occ_keys.push_back(occ_key);
+                occ_queried_++;
+            }
+        }
+        if (occ_query && d.occ_pool == VK_NULL_HANDLE) occ_state_[occ_key].veto = true;  // drawn without a query
         if (capture_active_ && query_pool_ && query_pass_.size() < kMaxQueries) {
             d.query = uint32_t(query_pass_.size());
             query_pass_.push_back(capture_pass_);
@@ -5847,6 +5969,7 @@ private:
         }
         ApplyDynamicState(d.dyn);
         if (d.query != UINT32_MAX) vkCmdBeginQuery(cb, query_pool_, d.query, 0);
+        if (d.occ_pool) vkCmdBeginQuery(cb, d.occ_pool, d.occ_q, 0);
         if (d.indexed) {
             if (bound_ib_.first != d.index_buf || bound_ib_.second != d.index_off || bound_ib_type_ != d.index_type) {
                 vkCmdBindIndexBuffer(cb, d.index_buf, d.index_off, d.index_type);
@@ -5858,6 +5981,7 @@ private:
             vkCmdDraw(cb, d.count, d.instances, d.first_vertex, d.base_instance);
         }
         if (d.query != UINT32_MAX) vkCmdEndQuery(cb, query_pool_, d.query);
+        if (d.occ_pool) vkCmdEndQuery(cb, d.occ_pool, d.occ_q);
     }
 
     // Viewport, scissor, blend constants and stencil values of the draw (render thread).
@@ -6853,6 +6977,19 @@ private:
                  "copy, %llu frames shown without (a later draw needed the frame's depth buffer)",
                  (unsigned long long)sharp_draws_, (unsigned long long)sharp_restarts_, (unsigned long long)sharp_dropped_);
         sharp_draws_ = sharp_restarts_ = sharp_dropped_ = 0;
+        if (dsr::GetRuntime().config.shadow_quality == 0)
+            LOGI(kTag, "shadow_quality 0: %llu shadow map draws left out (last 10 s)", (unsigned long long)shadow_draws_skipped_);
+        shadow_draws_skipped_ = 0;
+        if (dsr::GetRuntime().config.skip_prepass)
+            LOGI(kTag, "skip_prepass: %llu depth-only draws left out, %llu colour draws writing the depth, %llu colour draws "
+                 "without a twin (unchanged), %zu depth buffers tracked (last 10 s)", (unsigned long long)prepass_skipped_,
+                 (unsigned long long)prepass_converted_, (unsigned long long)prepass_unmatched_, prepass_.size());
+        prepass_skipped_ = prepass_converted_ = prepass_unmatched_ = 0;
+        if (dsr::GetRuntime().config.skip_hidden)
+            LOGI(kTag, "skip_hidden: %llu draws judged, %llu left out, %llu drawn with a visibility query, %llu came back "
+                 "into view, %zu draws tracked (last 10 s)", (unsigned long long)occ_judged_, (unsigned long long)occ_skipped_,
+                 (unsigned long long)occ_queried_, (unsigned long long)occ_woke_, occ_state_.size());
+        occ_judged_ = occ_skipped_ = occ_queried_ = occ_woke_ = 0;
         prehash_used_ = prehash_inline_ = 0;
         if (geo_buf_) {
             LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed), %.0f of %llu MB used, "
@@ -7316,22 +7453,500 @@ private:
     }
     // The sharp image for image src, in use from here on this frame: holding src as drawn so far (enlarged into it
     // when it starts being used); null if there is none (sharp_hud off, or the format cannot be enlarged).
-    Image* SharpStart(Image& src) {
+    Image* SharpStart(Image& src, bool post = true) {
         if (Image* a = SharpActive(src)) return a;
         Image* sh = SharpImage(src);
         if (!sh) return nullptr;
         if (InOpenPass(&src) || InOpenPass(sh)) EndRendering();
-        SharpEnlarge(src, *sh);
+        SharpEnlarge(src, *sh, post);
         SharpEntry& e = sharp_imgs_[src.serial];
         if (e.started) sharp_restarts_++;  // the image changed after it went sharp this frame
         e.active = e.started = true;
         return sh;
     }
+    // ---- post-processing of the enlarged 3D picture: FXAA 3.11 and FSR 1 (from pull request #47 by fernanfez00) ---
+    // When the 3D picture is enlarged into a sharp image (SharpEnlarge), FXAA (settings fxaa: 1 fast, 2 quality) runs
+    // on it at the render size first, and FSR 1 (settings fsr: EASU edge-adaptive upscaling, then RCAS sharpening)
+    // replaces the bilinear blit. Fragment passes over a full-screen triangle in render pass objects (every driver has
+    // them): no compute, no storage images. FXAA's SPIR-V is checked in (postfx_spv.h); FSR's is compiled from
+    // src/hle/nvn/shaders at build time (DSR_HAVE_FSR1; without glslc the build leaves FSR out).
+    enum PostKind { kPostFxaaFast, kPostFxaaQuality, kPostEasu, kPostRcas, kPostKinds };
+    struct PostPipe {
+        VkPipeline pipe = VK_NULL_HANDLE;
+        VkRenderPass rp = VK_NULL_HANDLE;
+        VkFormat fmt = VK_FORMAT_UNDEFINED;
+        int kind = 0;
+    };
+    struct PostJob {  // one pass, as queued for the recorder
+        VkPipeline pipe;
+        VkRenderPass rp;
+        VkFramebuffer fb;
+        VkImageView src_view;
+        uint32_t w, h, push_size;
+        uint32_t push[20];
+    };
+    VkShaderModule post_vs_ = VK_NULL_HANDLE, post_fsr_vs_ = VK_NULL_HANDLE, post_fs_[kPostKinds] = {};
+    VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
+    VkSampler post_sampler_ = VK_NULL_HANDLE;
+    std::vector<PostPipe> post_pipes_;
+    bool post_ready_ = false, post_failed_ = false, fsr_ready_ = false;
+    Image post_fxaa_img_;  // FXAA's output at the game's render size
+    Image post_fsr_tmp_;   // EASU's output (RCAS reads it)
+    uint64_t post_frames_ = 0;
+    static uint32_t FloatBits(float v) {
+        uint32_t u;
+        memcpy(&u, &v, sizeof(u));
+        return u;
+    }
+    // Linear-light formats (sRGB views and float formats sample as linear values): FXAA works in gamma 2.0 space.
+    static bool PostPerceptual(VkFormat f) {
+        switch (f) {
+            case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+            case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+            case VK_FORMAT_R32G32B32A32_SFLOAT:
+                return true;
+            default:
+                return false;
+        }
+    }
+    bool PostInit() {
+        if (post_ready_) return true;
+        if (post_failed_) return false;
+        post_failed_ = true;  // until everything below is made
+        if (props_.limits.maxPushConstantsSize < 80) {
+            LOGW(kTag, "post-processing off: push constants of %u bytes only", props_.limits.maxPushConstantsSize);
+            return false;
+        }
+        auto module = [&](const void* code, size_t bytes, VkShaderModule* out) {
+            VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            ci.codeSize = bytes;
+            ci.pCode = reinterpret_cast<const uint32_t*>(code);
+            return vkCreateShaderModule(device_, &ci, nullptr, out) == VK_SUCCESS;
+        };
+        namespace sp = postfx_spv;
+        if (!module(sp::kFullscreenVert, sp::kFullscreenVertSize, &post_vs_) ||
+            !module(sp::kFxaaFastFrag, sp::kFxaaFastFragSize, &post_fs_[kPostFxaaFast]) ||
+            !module(sp::kFxaaQualityFrag, sp::kFxaaQualityFragSize, &post_fs_[kPostFxaaQuality])) {
+            LOGW(kTag, "post-processing off: a shader module could not be made");
+            return false;
+        }
+#ifdef DSR_HAVE_FSR1
+        fsr_ready_ = module(kFsr1VertSpv, sizeof kFsr1VertSpv, &post_fsr_vs_) &&
+                     module(kFsr1EasuSpv, sizeof kFsr1EasuSpv, &post_fs_[kPostEasu]) &&
+                     module(kFsr1RcasSpv, sizeof kFsr1RcasSpv, &post_fs_[kPostRcas]);
+#endif
+        VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                          nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = 1;
+        li.pBindings = &bind;
+        if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &post_set_layout_) != VK_SUCCESS) return false;
+        VkPushConstantRange pr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 80};
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pl.setLayoutCount = 1;
+        pl.pSetLayouts = &post_set_layout_;
+        pl.pushConstantRangeCount = 1;
+        pl.pPushConstantRanges = &pr;
+        if (vkCreatePipelineLayout(device_, &pl, nullptr, &post_layout_) != VK_SUCCESS) return false;
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        if (vkCreateSampler(device_, &sci, nullptr, &post_sampler_) != VK_SUCCESS) return false;
+        post_failed_ = false;
+        post_ready_ = true;
+        LOGI(kTag, "post-processing ready: FXAA fast / quality%s", fsr_ready_ ? ", FSR 1" : " (FSR 1 not in this build)");
+        return true;
+    }
+    // Whether the passes can work on `f` (sampled or drawn): a filterable, drawable plain 2D colour image.
+    bool PostFxUsable(const Image& f) {
+        if (!PostInit()) return false;
+        constexpr VkFormatFeatureFlags kNeed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        return f.type == VK_IMAGE_TYPE_2D && f.levels == 1 && f.layers == 1 && f.aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+               (f.features & kNeed) == kNeed;
+    }
+    // An image like `f` at w x h in `slot`, made (again) when its size or format changed; retired like any image.
+    bool PostEnsureImage(Image& slot, const Image& f, int w, int h) {
+        if (slot.image && slot.width == w && slot.height == h && slot.vk_format == f.vk_format) return true;
+        if (slot.image) DestroyImage(slot);
+        Image n;
+        n.vk_format = f.vk_format;
+        n.nvn_format = f.nvn_format;
+        n.target = kTarget2D;
+        n.type = VK_IMAGE_TYPE_2D;
+        n.width = w;
+        n.height = h;
+        n.aspect = f.aspect;
+        n.features = f.features;
+        if (!AllocImage(n, false, false, &n.image, &n.memory)) return false;
+        n.serial = ++image_serial_;
+        slot = n;
+        LOGI(kTag, "post-processing image %dx%d (format %d)", w, h, int(slot.vk_format));
+        return true;
+    }
+    VkPipeline PostPipeline(int kind, VkFormat fmt, VkRenderPass* rp_out) {
+        for (const PostPipe& pp : post_pipes_)
+            if (pp.kind == kind && pp.fmt == fmt) {
+                *rp_out = pp.rp;
+                return pp.pipe;
+            }
+        if (!post_fs_[kind]) return VK_NULL_HANDLE;
+        const VkAttachmentLoadOp dont_care = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // every pass covers its whole target
+        VkRenderPass rp = MakeRenderPass(&fmt, 1, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, &dont_care,
+                                         VK_ATTACHMENT_LOAD_OP_LOAD);
+        if (!rp) return VK_NULL_HANDLE;
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = kind == kPostEasu || kind == kPostRcas ? post_fsr_vs_ : post_vs_;
+        stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = post_fs_[kind];
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState att{};
+        att.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                             VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &att;
+        const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+        VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        ci.stageCount = 2;
+        ci.pStages = stages;
+        ci.pVertexInputState = &vi;
+        ci.pInputAssemblyState = &ia;
+        ci.pViewportState = &vp;
+        ci.pRasterizationState = &rs;
+        ci.pMultisampleState = &ms;
+        ci.pColorBlendState = &cb;
+        ci.pDynamicState = &dy;
+        ci.layout = post_layout_;
+        ci.renderPass = rp;
+        VkPipeline pipe = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(device_, pipeline_cache_, 1, &ci, nullptr, &pipe) != VK_SUCCESS) {
+            LOGW(kTag, "post-processing pipeline %d (format %d) failed", kind, int(fmt));
+            pipe = VK_NULL_HANDLE;
+        }
+        post_pipes_.push_back({pipe, rp, fmt, kind});
+        *rp_out = rp;
+        return pipe;
+    }
+    VkFramebuffer PostFramebuffer(VkRenderPass rp, VkImageView view, uint32_t w, uint32_t h) {
+        // Cached like the draws' framebuffers (forgotten when the view is destroyed with its image: ReapRetired).
+        std::vector<uint64_t> key{reinterpret_cast<uint64_t>(rp), uint64_t(w) << 32 | h, reinterpret_cast<uint64_t>(view)};
+        {
+            std::lock_guard<std::mutex> lk(fb_mutex_);
+            auto it = fb_cache_.find(key);
+            if (it != fb_cache_.end()) return it->second;
+        }
+        VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fi.renderPass = rp;
+        fi.attachmentCount = 1;
+        fi.pAttachments = &view;
+        fi.width = w;
+        fi.height = h;
+        fi.layers = 1;
+        VkFramebuffer fb = VK_NULL_HANDLE;
+        if (vkCreateFramebuffer(device_, &fi, nullptr, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
+        std::lock_guard<std::mutex> lk(fb_mutex_);
+        fb_cache_.emplace(std::move(key), fb);
+        return fb;
+    }
+    // Recorder thread: a descriptor set of post_set_layout_ from the slot's pool (a full pool continues in another).
+    bool AllocPostSet(VkDescriptorSet* set) {
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &post_set_layout_;
+        for (int tries = 0; tries < 3; tries++) {
+            dai.descriptorPool = desc_pool_;
+            if (vkAllocateDescriptorSets(device_, &dai, set) == VK_SUCCESS) return true;
+            Slot& sl = slots_[rec_slot_];
+            if (sl.extra_used >= sl.extra_pools.size()) {
+                const VkDescriptorPool np = MakeDescriptorPool();
+                if (!np) return false;
+                sl.extra_pools.push_back(np);
+                desc_pools_added_++;
+            }
+            desc_pool_ = sl.extra_pools[sl.extra_used++];
+        }
+        return false;
+    }
+    // Recorder thread: one full-target pass sampling job.src_view.
+    void RecordPostPass(VkCommandBuffer cb, const PostJob& j) {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (!AllocPostSet(&set)) {
+            LogOnce("postfx_set", "post-processing: no descriptor set");
+            return;
+        }
+        VkDescriptorImageInfo ii{post_sampler_, j.src_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = set;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+        const VkRect2D area{{0, 0}, {j.w, j.h}};
+        VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        bi.renderPass = j.rp;
+        bi.framebuffer = j.fb;
+        bi.renderArea = area;
+        vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, j.pipe);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout_, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(cb, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, j.push_size, j.push);
+        const VkViewport vp{0.0f, 0.0f, float(j.w), float(j.h), 0.0f, 1.0f};
+        vkCmdSetViewport(cb, 0, 1, &vp);
+        vkCmdSetScissor(cb, 0, 1, &area);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cb);
+        // The pass bound its own pipeline, sets, dynamic state and push constants: the draws' cached state is stale.
+        InvalidateBoundState();
+    }
+    // One pass: `src` (sampled) into `dst` (drawn), both whole. False (nothing recorded) when it cannot be done.
+    bool PostPass(int kind, Image& src, Image& dst, const uint32_t* push, uint32_t push_words) {
+        VkRenderPass rp = VK_NULL_HANDLE;
+        const VkPipeline pipe = PostPipeline(kind, dst.vk_format, &rp);
+        if (!pipe) return false;
+        static const uint8_t kIdentity[4] = {2, 3, 4, 5};
+        Transition(src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        Transition(dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        const VkImageView sv = View(src, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 1, src.aspect, kIdentity);
+        const VkImageView dv = AttachmentView(dst);
+        const VkFramebuffer fb = dv ? PostFramebuffer(rp, dv, uint32_t(dst.width), uint32_t(dst.height)) : VK_NULL_HANDLE;
+        if (!sv || !fb) return false;
+        PostJob j{};
+        j.pipe = pipe;
+        j.rp = rp;
+        j.fb = fb;
+        j.src_view = sv;
+        j.w = uint32_t(dst.width);
+        j.h = uint32_t(dst.height);
+        j.push_size = push_words * 4;
+        memcpy(j.push, push, push_words * 4);
+        Rec([this, j](VkCommandBuffer cb) { RecordPostPass(cb, j); });
+        dst.written = true;
+        // The next user of `dst` either samples it (a layout change: Transition's barrier) or draws into it in the same
+        // layout (the HUD), which needs a barrier first (BeginRendering).
+        dst.attach_unsynced = true;
+        return true;
+    }
+    // FXAA / FSR 1 for the 3D picture `src` enlarged into the sharp image `dst`; false: not done (the plain blit).
+    bool PostEnlarge(Image& src, Image& dst) {
+        const dsr::RuntimeConfig& c = dsr::GetRuntime().config;
+        if (!c.fxaa && !c.fsr) return false;
+        if (!PostFxUsable(src) || !PostFxUsable(dst)) {
+            LogOnce("postfx_fmt", "post-processing: the frame (format %d) cannot be filtered here: plain blit", src.nvn_format);
+            return false;
+        }
+        Image* in = &src;
+        if (c.fxaa && PostEnsureImage(post_fxaa_img_, src, src.width, src.height)) {
+            const uint32_t push[1] = {PostPerceptual(src.vk_format) ? 1u : 0u};
+            if (PostPass(c.fxaa >= 2 ? kPostFxaaQuality : kPostFxaaFast, src, post_fxaa_img_, push, 1)) in = &post_fxaa_img_;
+        }
+        bool done = false;
+        if (c.fsr && fsr_ready_ && PostEnsureImage(post_fsr_tmp_, dst, dst.width, dst.height)) {
+            // AMD's ffxFsrPopulateEasuConstants with the whole image as input; RCAS at 70% sharpness (PR #47's default).
+            const float iw = float(in->width), ih = float(in->height), ow = float(dst.width), oh = float(dst.height);
+            const uint32_t easu[16] = {FloatBits(iw / ow), FloatBits(ih / oh), FloatBits(0.5f * iw / ow - 0.5f),
+                                       FloatBits(0.5f * ih / oh - 0.5f), FloatBits(1.0f / iw), FloatBits(1.0f / ih),
+                                       FloatBits(1.0f / iw), FloatBits(-1.0f / ih), FloatBits(-1.0f / iw),
+                                       FloatBits(2.0f / ih), FloatBits(1.0f / iw), FloatBits(2.0f / ih), FloatBits(0.0f),
+                                       FloatBits(4.0f / ih), 0, 0};
+            const float stops = 2.0f * (1.0f - 0.70f);  // 0 stops = the sharpest
+            const uint32_t rcas[4] = {FloatBits(std::exp2(-stops)), 0, 0, 0};
+            done = PostPass(kPostEasu, *in, post_fsr_tmp_, easu, 16) && PostPass(kPostRcas, post_fsr_tmp_, dst, rcas, 4);
+        } else if (c.fsr && !fsr_ready_) {
+            LogOnce("fsr_missing", "fsr: FSR 1 is not available (not in this build, or its shaders failed): plain blit");
+        }
+        if (!done && in == &src) return false;  // nothing applied: the caller's blit
+        if (!done) SharpBlit(*in, dst);         // FXAA only: its result enlarged by the blit
+        if (post_frames_++ == 0)
+            LOGI(kTag, "post-processing active: %s%s, %dx%d -> %dx%d", in != &src ? (c.fxaa >= 2 ? "FXAA quality" : "FXAA fast") : "",
+                 done ? (in != &src ? " + FSR 1" : "FSR 1") : " + blit", src.width, src.height, dst.width, dst.height);
+        return true;
+    }
+    void SharpBlit(Image& from, Image& to) {
+        Transition(from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit b{};
+        b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.srcOffsets[1] = {from.width, from.height, 1};
+        b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.dstOffsets[1] = {to.width, to.height, 1};
+        Rec([b, si = from.image, di = to.image](VkCommandBuffer cb) {
+            vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, di, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                           VK_FILTER_LINEAR);
+        });
+        barriers_ += 2;
+    }
+
+    // ---- shadow_quality 0 (from PR #47) ----------------------------------------------------------------------------
+    int shadow_skip_logged_ = 0;
+    uint64_t shadow_draws_skipped_ = 0;
+    // Depth images whose pass was left out as a shadow map: address and size, so a different image that later lands on
+    // the same memory is not taken for one.
+    std::unordered_set<uint64_t> shadow_maps_;
+    static uint64_t ShadowMapKey(const Image& i) { return i.addr | (uint64_t(i.width) << 44); }
+
+    // ---- skip_prepass (experimental, for Mali; from PR #47) --------------------------------------------------------
+    // Frame captures: the world is drawn twice on the same depth buffer, first without colour (depth func LEQUAL,
+    // write on), then with colour (LEQUAL, write off), the same draws. On a tile-based GPU the second pass needs no
+    // prepass (hidden surface removal), so the first one only repeats the vertex work and the binning. A depth buffer
+    // that had >= 16 depth-only draws last frame, >= 80% of them matched by a colour draw of the same mesh, is treated
+    // this way this frame: its depth-only draws are left out and the matched colour draws write the depth. Colour
+    // draws without a twin (decals, sky, overlays) keep the game's state.
+    struct PrepassStat {
+        uint32_t frame = 0, pre = 0, main = 0, matched = 0;
+        bool learned = false;
+    };
+    std::unordered_map<uint64_t, PrepassStat> prepass_;
+    std::unordered_set<uint64_t> prepass_keys_;  // this frame's depth-only draws (mesh identity + depth buffer)
+    uint32_t prepass_keys_frame_ = ~0u;
+    uint64_t prepass_skipped_ = 0, prepass_converted_ = 0, prepass_unmatched_ = 0;
+    static uint64_t PrepassKey(const DrawParams& p, uint64_t depth_addr) {
+        uint64_t h = 1469598103934665603ull;
+        const auto mix = [&h](uint64_t v) {
+            h ^= v;
+            h *= 1099511628211ull;
+            h ^= h >> 29;
+        };
+        mix(depth_addr);
+        mix(p.index_address);
+        mix(uint64_t(p.count) | (uint64_t(p.index_type) << 40));
+        mix(uint64_t(int64_t(p.base_vertex)));
+        mix(uint64_t(uint32_t(p.mode)));
+        mix(uint64_t(int64_t(p.first)));
+        mix(uint64_t(uint32_t(p.instances)));
+        return h;
+    }
+
+    // ---- skip_hidden (experimental; from PR #47, its level 1) ------------------------------------------------------
+    // Frame captures (Mali-G57): most draws of the big world passes cover no pixel at all yet are still vertex-shaded
+    // and tiled. Draws of the world passes get an occlusion query; its result (read when the submission has finished)
+    // says whether the draw produced any sample. A draw that produced none twice running is left out, and is drawn
+    // again (with a query) every kOccRetest frames (staggered by key), so something that comes into view shows up a few
+    // frames late at most. A draw is recognised by its shaders, index data, vertex buffer and target width (not the
+    // object's constants, which change every frame while the camera moves: draws sharing a mesh share a key, and the
+    // key counts as hidden only when none of them produced a sample).
+    struct OccState {
+        uint32_t last_test = 0;  // frame of the last draw that had a query
+        uint32_t last_seen = 0;
+        uint8_t hidden = 0;      // consecutive tests with no samples
+        bool veto = false;       // a draw of this key was drawn without a query: its visibility is unknown
+    };
+    static constexpr uint32_t kOccQueries = 2048;
+    static constexpr uint8_t kOccHiddenTests = 2;
+    static constexpr uint32_t kOccRetest = 3;
+    std::unordered_map<uint64_t, OccState> occ_state_;
+    uint32_t occ_frame_ = 0;
+    uint64_t occ_skipped_ = 0, occ_queried_ = 0, occ_judged_ = 0, occ_woke_ = 0;
+    std::vector<uint64_t> occ_results_;
+    std::unordered_map<uint64_t, bool> occ_agg_;
+    // Only opaque world geometry: indexed triangles (lists or strips), depth tested, into a depth target at least 256
+    // wide, no stencil, no blending, writing colour or depth. Everything else (the game's own visibility tests, effects)
+    // is always drawn.
+    bool OccCandidate(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth, bool shader_depth_test) {
+        if (shader_depth_test || p.index_type < 0 || (p.mode != 4 && p.mode != 5) || p.count < 3) return false;
+        if (!depth || depth->width < 256 || !st_.depth.depth_test || st_.depth.stencil_test) return false;
+        if (st_.color.blend_enable != 0) return false;
+        return st_.depth.depth_write || (!colors.empty() && colors[0] && (st_.channel.mask & 0xF) != 0);
+    }
+    bool OccKey(const DrawParams& p, const VertexInput& vin, uint32_t target_w, uint64_t* out) {
+        if (!st_.program[0] || vin.bindings.empty()) return false;
+        uint64_t h = 1469598103934665603ull;
+        const auto mix = [&h](uint64_t v) {
+            h ^= v;
+            h *= 1099511628211ull;
+            h ^= h >> 29;
+        };
+        mix(st_.program[0]->hash);
+        mix(st_.program[1] ? st_.program[1]->hash : 0);
+        mix(uint64_t(p.count) | (uint64_t(p.index_type) << 40) | (uint64_t(st_.depth.depth_write) << 48));
+        mix(p.index_address);
+        mix(uint64_t(int64_t(p.base_vertex)));
+        mix(uint64_t(uint32_t(p.mode)));
+        mix(st_.vertex_buffers[vin.bindings[0].binding].address);
+        mix(uint64_t(target_w));
+        *out = h;
+        return true;
+    }
+    // 0: draw, 1: draw with a query, 2: leave out.
+    int OccDecide(uint64_t key) {
+        if (occ_state_.size() > 40000) occ_state_.clear();  // keys that never repeat: start over
+        OccState& s = occ_state_[key];
+        s.last_seen = occ_frame_;
+        if (s.hidden >= kOccHiddenTests) {
+            // Every draw sharing this key is retested on the key's retest frame; retests are staggered by key so the
+            // hidden geometry does not all come back on the same frame.
+            if (s.last_test == occ_frame_) return 1;
+            const uint32_t since = occ_frame_ - s.last_test;
+            if (since < kOccRetest || (occ_frame_ + uint32_t(key >> 7)) % kOccRetest != 0) return 2;
+        }
+        s.last_test = occ_frame_;
+        return 1;
+    }
+    // The results of a finished submission's queries (its fence has signalled): render thread.
+    void CollectOcclusion(Slot& sl) {
+        const uint32_t n = std::min<uint32_t>(sl.occ_used, uint32_t(sl.occ_keys.size()));
+        sl.occ_used = 0;
+        if (!sl.occ || !n) {
+            sl.occ_keys.clear();
+            return;
+        }
+        std::vector<uint64_t>& res = occ_results_;
+        res.assign(size_t(n) * 2, 0);
+        const VkResult r = vkGetQueryPoolResults(device_, sl.occ, 0, n, res.size() * 8, res.data(), 16,
+                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (r == VK_SUCCESS || r == VK_NOT_READY) {
+            occ_agg_.clear();
+            for (uint32_t i = 0; i < n; i++) {
+                if (!res[size_t(i) * 2 + 1]) continue;  // never ran (the draw was dropped later)
+                bool& vis = occ_agg_[sl.occ_keys[i]];
+                vis = vis || res[size_t(i) * 2] != 0;
+            }
+            for (const auto& kv : occ_agg_) {
+                auto it = occ_state_.find(kv.first);
+                if (it == occ_state_.end()) continue;
+                if (kv.second || it->second.veto) {
+                    if (kv.second && it->second.hidden >= kOccHiddenTests) occ_woke_++;
+                    it->second.hidden = 0;
+                    it->second.veto = false;
+                } else if (it->second.hidden < 255) {
+                    it->second.hidden++;
+                }
+            }
+        }
+        sl.occ_keys.clear();
+    }
+
     // A new frame: no sharp image in use.
     void SharpFrameEnd() {
         for (auto& [serial, e] : sharp_imgs_) e.active = e.started = false;
     }
-    void SharpEnlarge(Image& src, Image& dst) {
+    // post: the 3D picture is being enlarged (the HUD is about to be drawn on it, or none was): FXAA and FSR 1 apply.
+    void SharpEnlarge(Image& src, Image& dst, bool post = true) {
+        EndRendering();  // a blit or a pass cannot be recorded inside the open render pass
+        if (post && PostEnlarge(src, dst)) return;
         Image* sh = &dst;
         Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(*sh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -7445,6 +8060,9 @@ private:
         bool pending = false;
         std::vector<Readback> readbacks;
         VkQueryPool ts = VK_NULL_HANDLE;  // GPU time of the submission (start, end)
+        VkQueryPool occ = VK_NULL_HANDLE;  // skip_hidden: occlusion queries of the submission's draws
+        uint32_t occ_used = 0;
+        std::vector<uint64_t> occ_keys;    // the draw key of each query
         bool ts_written = false;
         VkDescriptorPool pool = VK_NULL_HANDLE;
         std::vector<VkDescriptorPool> extra_pools;  // when `pool` fills up (recorder thread)

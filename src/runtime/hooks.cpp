@@ -218,15 +218,34 @@ void ApplyPerformanceMode(Runtime& rt, const GameBuild& b) {
         done += done.empty() ? "low-quality effects" : ", low-quality effects";
     else
         LOGW("hooks", "performance mode: effects quality not changed (%s)", err.c_str());
-    int32_t* shadow = reinterpret_cast<int32_t*>(rt.main.base() + b.shadow_size);
-    if (rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) && *shadow == 2048) {
-        *shadow = 1024;
-        done += done.empty() ? "shadow maps 1024" : ", shadow maps 1024";
-    } else {
-        LOGW("hooks", "performance mode: shadow map size not changed (found %d)",
-             rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) ? *shadow : -1);
+    if (rt.config.shadow_quality == 3) {  // shadow_quality 0-2 set their own size (ApplyShadowQuality)
+        int32_t* shadow = reinterpret_cast<int32_t*>(rt.main.base() + b.shadow_size);
+        if (rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) && *shadow == 2048) {
+            *shadow = 1024;
+            done += done.empty() ? "shadow maps 1024" : ", shadow maps 1024";
+        } else {
+            LOGW("hooks", "performance mode: shadow map size not changed (found %d)",
+                 rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) ? *shadow : -1);
+        }
     }
     LOGI("hooks", "performance mode: %s", done.empty() ? "nothing applied" : done.c_str());
+}
+
+// Shadow quality (settings shadow_quality 0-2; from pull request #47): the shadow map size global the engine sizes its
+// shadow target from (see GameBuild::shadow_size) at 512 (0 and 1) or 1024 (2). With 0 the renderer also leaves the
+// shadow pass out and answers every lookup "lit" (vk_backend.cpp), so the small map only saves memory.
+void ApplyShadowQuality(Runtime& rt, const GameBuild& b) {
+    const int q = rt.config.shadow_quality;
+    if (q >= 3) return;
+    const int size = q == 2 ? 1024 : 512;
+    int32_t* shadow = reinterpret_cast<int32_t*>(rt.main.base() + b.shadow_size);
+    if (rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) && *shadow == 2048) {
+        *shadow = size;
+        LOGI("hooks", "shadow quality %d: shadow maps %dx%d%s", q, size, size, q == 0 ? ", shadows off" : "");
+    } else {
+        LOGW("hooks", "shadow quality: shadow map size not changed (found %d)%s",
+             rt.main.Contains(reinterpret_cast<uintptr_t>(shadow)) ? *shadow : -1, q == 0 ? "; shadows still off" : "");
+    }
 }
 
 // Lighter post-processing: no ambient occlusion, depth of field, camera motion blur or light shafts (see GameBuild).
@@ -730,6 +749,7 @@ void InstallGameHooks() {
     ApplyFxClusterFix(rt);
     if (rt.config.skip_intro) SkipIntroLogos(rt, b);
     if (rt.config.performance_mode) ApplyPerformanceMode(rt, b);
+    ApplyShadowQuality(rt, b);
     if (rt.config.lighter_post_fx) ApplyLighterPostFx(rt, b);
     {
         constexpr uint32_t kAdd2MiB = 0x11480108;  // add w8, w8, #0x200, lsl #12

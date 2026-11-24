@@ -57,6 +57,20 @@ struct RuntimeConfig {
     // sharp_hud: with a render scale, the HUD, menus and text drawn at the screen's resolution (up to
     // 1080 lines) instead of the render size (vk_backend.cpp, SharpStart).
     bool sharp_hud = false;
+    // Post-processing of the enlarged 3D picture (from pull request #47; turns the sharp-HUD image on by itself):
+    // fxaa 0 = off, 1 = FXAA 3.11 fast (for Mali), 2 = quality; fsr = FSR 1 upscaling (EASU + RCAS sharpening) instead
+    // of the bilinear enlargement.
+    int fxaa = 0;
+    bool fsr = false;
+    // shadow_quality: 0 = no shadows (the shadow map pass is not drawn, lookups say "lit"), 1 = 512, 2 = 1024,
+    // 3 = the game's 2048 (1024 with performance_mode).
+    int shadow_quality = 3;
+    // skip_prepass (experimental, for Mali): the game's depth-only world pass is left out and the colour pass writes
+    // the depth instead (vk_backend.cpp, PrepassStat).
+    bool skip_prepass = false;
+    // skip_hidden (experimental): world draws that covered no pixel in recent frames (occlusion queries) are left
+    // out, retested every few frames (vk_backend.cpp, OccDecide).
+    bool skip_hidden = false;
     int render_width = 1280;  // the game's render size once aspect_ratio and render_scale are applied
     int render_height = 720;
     float render_scale = 1.0f;  // settings render_scale: 0.5 - 1.0 of the game's 720-line resolution
