@@ -129,6 +129,10 @@ struct RuntimeConfig {
     bool lighter_post_fx = false;
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
+    // geo_cache_mb (settings menu "Geometry cache", from pull request #47): size of the geometry cache (vertex / index
+    // data kept on the GPU across frames), 32-512 MB. Smaller uses less RAM but fills sooner (emptied and refilled: a
+    // short stall). Performance mode sets 64.
+    int geo_cache_mb = 192;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
     // anisotropy (settings menu "Anisotropic filtering"): -1 = as the game asks, 0 = off, 2 / 4 / 8 / 16 = that level on
     // every mipmapped, linearly filtered texture (capped at the GPU's limit). Sharper textures at grazing angles

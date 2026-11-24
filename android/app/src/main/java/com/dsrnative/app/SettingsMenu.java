@@ -525,6 +525,8 @@ public final class SettingsMenu {
                 new String[] {Strings.t("off"), Strings.t("hidden_gentle"), Strings.t("hidden_aggr")}, "0");
         toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        choice("geo_cache_mb", Strings.t("geo_t"), Strings.t("geo_n") + " " + Strings.t("changes_next"),
+                new String[] {"192", "128", "96", "64"}, new String[] {"192 MB", "128 MB", "96 MB", "64 MB"}, "192");
         // Mali fixes: settings for GPUs such as Mali (no BC textures, tile-based), folded away by default.
         final int maliFirst = mBody.getChildCount() + 1;  // after the group's header row
         TextView maliHeader = subsection(Strings.t("sec_mali"));
@@ -1428,6 +1430,20 @@ public final class SettingsMenu {
                     writeSetting(key + "_before_perf", "");
                     mValues.put(key + "_before_perf", "");
                 }
+            }
+        }
+        // Performance mode also shrinks the geometry cache to 64 MB (less RAM for 4 GB phones); off puts back what it was.
+        if (on) {
+            String was = mValues.containsKey("geo_cache_mb") ? mValues.get("geo_cache_mb") : "192";
+            writeSetting("geo_cache_mb_before_perf", was);
+            mValues.put("geo_cache_mb_before_perf", was);
+            if (writeSetting("geo_cache_mb", "64")) mValues.put("geo_cache_mb", "64");
+        } else {
+            String before = mValues.get("geo_cache_mb_before_perf");
+            if (before != null && !before.isEmpty()) {
+                if (writeSetting("geo_cache_mb", before)) mValues.put("geo_cache_mb", before);
+                writeSetting("geo_cache_mb_before_perf", "");
+                mValues.put("geo_cache_mb_before_perf", "");
             }
         }
         String cur = mValues.containsKey("render_scale") ? mValues.get("render_scale") : "1.00";

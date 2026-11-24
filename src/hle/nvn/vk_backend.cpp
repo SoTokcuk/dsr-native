@@ -6486,7 +6486,7 @@ private:
     // when their content changed: small ranges (where per-frame data like particles and UI lives) are hashed in
     // full, large ones at 256 spots plus both ends. When the buffer fills up it is emptied (after the GPU is
     // done with it) and refilled.
-    static constexpr VkDeviceSize kGeoSize = 192ull << 20;
+    VkDeviceSize geo_size_ = 192ull << 20;  // settings geo_cache_mb (read when the cache is created)
     VkBuffer geo_buf_ = VK_NULL_HANDLE;
     VkDeviceMemory geo_mem_ = VK_NULL_HANDLE;
     uint8_t* geo_ptr_ = nullptr;
@@ -6609,7 +6609,8 @@ private:
         if (geo_buf_) return true;
         if (geo_failed_) return false;
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bi.size = kGeoSize;
+        geo_size_ = VkDeviceSize(std::clamp(dsr::GetRuntime().config.geo_cache_mb, 32, 512)) << 20;
+        bi.size = geo_size_;
         bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
         VkMemoryRequirements req;
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
@@ -6620,9 +6621,9 @@ private:
         ai.memoryTypeIndex = StagingMemory(req.memoryTypeBits);
         if (vkAllocateMemory(device_, &ai, nullptr, &geo_mem_) != VK_SUCCESS) goto fail;
         vkBindBufferMemory(device_, geo_buf_, geo_mem_, 0);
-        if (vkMapMemory(device_, geo_mem_, 0, kGeoSize, 0, &p) != VK_SUCCESS) goto fail;
+        if (vkMapMemory(device_, geo_mem_, 0, geo_size_, 0, &p) != VK_SUCCESS) goto fail;
         geo_ptr_ = static_cast<uint8_t*>(p);
-        LOGI(kTag, "geometry cache: %llu MB", (unsigned long long)(kGeoSize >> 20));
+        LOGI(kTag, "geometry cache: %llu MB", (unsigned long long)(geo_size_ >> 20));
         return true;
     fail:
         LOGW(kTag, "geometry cache unavailable: vertex data is streamed every frame");
@@ -6715,7 +6716,7 @@ private:
             return VK_WHOLE_SIZE;
         }
         const VkDeviceSize need = (size + 63) & ~VkDeviceSize(63);
-        if (geo_off_ + need > kGeoSize) {
+        if (geo_off_ + need > geo_size_) {
             // Full: start over once the GPU no longer reads any of it.
             Flush();
             WaitGpuIdle();
@@ -7011,7 +7012,7 @@ private:
         if (geo_buf_) {
             LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed), %.0f of %llu MB used, "
                  "%llu resets", (unsigned long long)geo_hits_, (unsigned long long)geo_misses_, geo_bytes_ / 1048576.0,
-                 (unsigned long long)geo_volatile_, geo_off_ / 1048576.0, (unsigned long long)(kGeoSize >> 20),
+                 (unsigned long long)geo_volatile_, geo_off_ / 1048576.0, (unsigned long long)(geo_size_ >> 20),
                  (unsigned long long)geo_resets_);
             geo_hits_ = geo_misses_ = geo_bytes_ = geo_volatile_ = 0;
         }
