@@ -56,6 +56,12 @@ int main(int argc, char** argv) {
             continue;
         }
         ok++;
+        if (getenv("DSR_LIST")) {  // index, code hash (as the app logs it), stage, constant buffers read
+            uint64_t hh = 1469598103934665603ull;
+            for (uint32_t i = 0; i < h.code_size; i++) hh = (hh ^ code[i]) * 1099511628211ull;
+            printf("%u %016llx %s cbufs %05x c0 %u bytes\n", h.index, (unsigned long long)hh,
+                   r.info.stage == Stage::Vertex ? "vs" : "fs", r.info.cbuf_mask, r.info.cbuf_bytes[0]);
+        }
         char path[512];
         snprintf(path, sizeof(path), "%s/%u_%s.spv", argv[2], h.index, r.info.stage == Stage::Vertex ? "vs" : "fs");
         FILE* o = fopen(path, "wb");
