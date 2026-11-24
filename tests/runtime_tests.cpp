@@ -365,6 +365,32 @@ static void TestNvnCommands() {
         CHECK(SamplerById(5, spool_a).wrap[0] == 5 && SamplerById(5, spool_b).wrap[0] == 7);
     }
 
+    // An upload list (staging buffer -> texture) recorded at load time is still there to be called after
+    // many more recordings (the engine's CPU-writable textures: the player's face).
+    {
+        uint8_t cb4[256], cb5[256];
+        CopyRegion region{0, 0, 0, 16, 16, 1};
+        Nvn<void (*)(void*)>("nvnCommandBufferBeginRecording")(cb4);
+        Nvn<void (*)(void*, uint64_t, const void*, const void*, const CopyRegion*, int)>(
+            "nvnCommandBufferCopyBufferToTexture")(cb4, reinterpret_cast<uint64_t>(storage) + 0x300000, color, nullptr,
+                                                   &region, 0);
+        const uint64_t upload = Nvn<uint64_t (*)(void*)>("nvnCommandBufferEndRecording")(cb4);
+        for (int i = 0; i < 3000; i++) {
+            Nvn<void (*)(void*)>("nvnCommandBufferBeginRecording")(cb5);
+            Nvn<void (*)(void*)>("nvnCommandBufferDrawArrays")(cb5);
+            Nvn<uint64_t (*)(void*)>("nvnCommandBufferEndRecording")(cb5);
+        }
+        Nvn<void (*)(void*)>("nvnCommandBufferBeginRecording")(cb5);
+        Nvn<void (*)(void*, int, const uint64_t*)>("nvnCommandBufferCallCommands")(cb5, 1, &upload);
+        const uint64_t frame = Nvn<uint64_t (*)(void*)>("nvnCommandBufferEndRecording")(cb5);
+        be.executed.clear();
+        Nvn<void (*)(void*, int, const uint64_t*)>("nvnQueueSubmitCommands")(nullptr, 1, &frame);
+        int copies = 0;
+        if (be.executed.size() == 1)
+            ForEachCmd(be.executed[0], [&](const Cmd& c) { copies += c.type == CmdType::CopyBufferToTexture; });
+        CHECK(copies == 1);
+    }
+
     SetBackendForTesting(nullptr);
 }
 

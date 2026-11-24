@@ -4,7 +4,8 @@
 // returns an NVNcommandHandle) and submits handles to a queue. We record each command into a host
 // CmdList; EndRecording files the list under a new handle; nvnQueueSubmitCommands hands the lists to
 // the backend in order. Handles may be submitted many times; the oldest are dropped once there are
-// more than kMaxHandles (real NVN handles die when their command memory is reused anyway).
+// more than kMaxHandles (real NVN handles die when their command memory is reused anyway), except lists
+// used repeatedly and lists not used yet (see EndRecording).
 //
 // Every texture referenced by a command is captured by value (description + storage address) at
 // record time, so later Finalize/re-Initialize of the NVN object does not affect recorded work.
@@ -43,6 +44,11 @@ constexpr const char* kTag = "nvn";
 // the game submits more than once (static command sets) are kept regardless (up to kMaxKept).
 constexpr size_t kMaxHandles = 512;
 constexpr size_t kMaxKept = 2048;
+// Upload lists (a staging buffer -> texture copy and little else) are kept apart, up to this many: the engine
+// records one when it creates a CPU-writable texture and calls it (CallCommands) whenever the CPU has written
+// the texture, possibly minutes later. The player's face texture is filled that way after the save loads; its
+// list had long been dropped from the recent ones, so the face stayed black.
+constexpr size_t kMaxUploads = 4096;
 
 // The game checks GetCommandMemoryUsed before submitting and skips buffers that report 0, so report a
 // plausible figure: an estimate of what real NVN would have written, reset when memory is (re)added.
@@ -63,6 +69,7 @@ std::unordered_map<uint64_t, std::shared_ptr<const CmdList>> g_handles;
 std::deque<uint64_t> g_handle_order;
 std::unordered_map<uint64_t, uint32_t> g_submit_counts;  // submissions per live handle
 std::deque<uint64_t> g_kept;                               // handles submitted twice or more
+std::deque<uint64_t> g_uploads;                            // upload lists (see kMaxUploads)
 uint64_t g_next_handle = 1;
 
 GpuStats g_stats;
@@ -175,6 +182,12 @@ void AddControlMemory(void* cb, void*, size_t) { RecorderOf(cb).control_used = 0
 // Field reads only: Table::Copy would copy the whole recorder, every command recorded so far included.
 size_t GetCommandMemoryUsed(const void* cb) { return RecorderOf(const_cast<void*>(cb)).command_used; }
 size_t GetControlMemoryUsed(const void* cb) { return RecorderOf(const_cast<void*>(cb)).control_used; }
+bool IsUploadList(const CmdList& l) {
+    if (l.empty() || l.size() > 8) return false;
+    for (const Cmd& c : l)
+        if (c.type == CmdType::CopyBufferToTexture) return true;
+    return false;
+}
 uint64_t EndRecording(void* cb) {
     Recorder& r = RecorderOf(cb);
     r.last_size = r.cmds.size();
@@ -193,7 +206,17 @@ uint64_t EndRecording(void* cb) {
     g_end_count++;
     std::lock_guard<std::mutex> lk(g_handle_mutex);
     uint64_t h = g_next_handle++;
+    const bool upload = IsUploadList(*list);
     g_handles.emplace(h, std::move(list));
+    if (upload) {  // kept apart, for as long as the game may call it
+        g_uploads.push_back(h);
+        while (g_uploads.size() > kMaxUploads) {
+            g_handles.erase(g_uploads.front());
+            g_submit_counts.erase(g_uploads.front());
+            g_uploads.pop_front();
+        }
+        return h;
+    }
     g_handle_order.push_back(h);
     while (g_handle_order.size() > kMaxHandles) {
         const uint64_t old = g_handle_order.front();
@@ -220,14 +243,30 @@ bool IsRecording(const void* cb) { return RecorderOf(const_cast<void*>(cb)).reco
 // game's render thread a large share of its time.
 void CallCommands(void* cb, int n, const uint64_t* handles) {
     Recorder& r = RecorderOf(cb);
-    for (int i = 0; i < n; i++)
-        if (auto list = FindHandle(handles[i])) {
-            Cmd c;
-            c.type = CmdType::CallList;
-            c.obj = std::move(list);
-            r.cmds.push_back(std::move(c));
-            r.command_used += kBytesPerCommand;
+    for (int i = 0; i < n; i++) {
+        std::shared_ptr<const CmdList> list;
+        {
+            std::lock_guard<std::mutex> lk(g_handle_mutex);
+            auto it = g_handles.find(handles[i]);
+            if (it != g_handles.end()) {
+                list = it->second;
+                g_submit_counts[handles[i]]++;  // a use, like a submission (decides how long it is kept)
+            }
         }
+        if (!list) {
+            g_unknown_handles++;
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1) < 8)
+                LOGW(kTag, "nvnCommandBufferCallCommands: handle %llu is no longer known (its commands are lost)",
+                     (unsigned long long)handles[i]);
+            continue;
+        }
+        Cmd c;
+        c.type = CmdType::CallList;
+        c.obj = std::move(list);
+        r.cmds.push_back(std::move(c));
+        r.command_used += kBytesPerCommand;
+    }
 }
 
 // A render target's view picks the mip level and array layer that is rendered into.
