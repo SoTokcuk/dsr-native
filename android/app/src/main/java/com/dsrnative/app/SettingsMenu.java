@@ -99,7 +99,10 @@ public final class SettingsMenu {
         TouchControls.prepareSkinsDir(settingsPath);
         TouchControls.setSkin(activity, v.get("touch_skin"), settingsPath);
         if ("1".equals(v.get("fps_counter"))) FpsCounter.apply(activity, true);
-        if (!"0".equals(v.get("keep_alive"))) KeepAliveService.apply(activity, true);  // on unless turned off
+        if (!"0".equals(v.get("keep_alive"))) {  // on unless turned off
+            KeepAliveService.apply(activity, true);
+            KeepAliveService.askNotificationPermission(activity);
+        }
         showFirstLaunchTip(activity);
     }
 

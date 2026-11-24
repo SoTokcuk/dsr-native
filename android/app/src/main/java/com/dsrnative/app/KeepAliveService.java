@@ -9,7 +9,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
@@ -27,7 +26,7 @@ import android.os.Process;
 public class KeepAliveService extends Service {
     private static final String CHANNEL = "dsr_running";
     private static final int NOTIFICATION_ID = 1;
-    private static final int REQ_NOTIFICATIONS = 4110;
+    static final int REQ_NOTIFICATIONS = 4110;
 
     /** Starts or stops the service (from any thread). */
     static void apply(Activity activity, boolean on) {
@@ -48,16 +47,15 @@ public class KeepAliveService extends Service {
     }
 
     /**
-     * Android 13+: notifications need the player's permission. Without it the service still works (Android keeps
-     * the app the same), only the notification is not shown. Asked when the player turns the setting on.
+     * Android 13+: notifications need the player's permission, and without it the notification (and with it, on
+     * some phones, the protection) is missing. Asked at each game start while the setting is on and the permission
+     * is missing, and when the player turns the setting on. Android itself stops showing the request after the
+     * player has refused it twice (the setting's note then applies: allow it in the app's system settings).
      */
     static void askNotificationPermission(Activity activity) {
         if (Build.VERSION.SDK_INT < 33) return;
         if (activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED)
             return;
-        SharedPreferences prefs = activity.getSharedPreferences("dsrnative", Context.MODE_PRIVATE);
-        if (prefs.getBoolean("notification_permission_asked", false)) return;
-        prefs.edit().putBoolean("notification_permission_asked", true).apply();
         activity.runOnUiThread(() -> {
             try {
                 activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);

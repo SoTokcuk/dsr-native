@@ -516,6 +516,12 @@ public class GameActivity extends NativeActivity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == KeepAliveService.REQ_NOTIFICATIONS) {
+            // Allowed: started again so its notification is posted now (it was not shown without the permission).
+            if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                KeepAliveService.apply(this, true);
+            return;
+        }
         mAsked = false;
         if (hasStorageAccess()) sStorage = 1;
         else showStorageDialog();
