@@ -5122,6 +5122,7 @@ private:
 
         Phase(5);
         // ---- queue the draw: the recorder thread builds its descriptor sets and records it --------------------
+        LogOneShotDraw(p, colors, depth);
         first_draw_ = {&p, fs, modes, depth != nullptr, shader_depth_test};
         const bool rendering_ok = EnsureRendering(colors, depth, &extent);
         first_draw_ = {};
@@ -5755,6 +5756,25 @@ private:
     // (it appears a frame or two later), not for something drawn once into a texture the game keeps (the player's
     // face is drawn into its texture when a character loads: skipped, the texture kept garbage). A draw into a
     // target that was not drawn into in the last 2 lists waits for its pipeline.
+    // Diagnostics (face texture): draws into small colour targets (up to 256x256) not drawn in the last 2 lists
+    // are logged (the first 60 targets), and those targets are written back to game memory after the list, so a
+    // frame capture's "game memory means" shows what the GPU drew there.
+    std::unordered_set<uint64_t> one_shot_logged_;
+    void LogOneShotDraw(const DrawParams& p, const std::vector<Image*>& colors, const Image* depth) {
+        for (size_t i = 0; i < colors.size(); i++) {
+            Image* c = colors[i];
+            if (!c || c->attached_list + 2 >= list_counter_ || size_t(c->width) * c->height > 256 * 256) continue;
+            if (c->type == VK_IMAGE_TYPE_2D && !IsDepthFormat(c->nvn_format)) small_rts_.insert(c);
+            if (one_shot_logged_.size() >= 60 || !one_shot_logged_.insert(c->addr ^ list_counter_ << 40).second) continue;
+            const uint64_t vsh = st_.program[0] ? st_.program[0]->hash : 0, fsh = st_.program[1] ? st_.program[1]->hash : 0;
+            LOGI(kTag, "draw into a texture not drawn recently: rt%zu fmt %d %dx%d @%llx (%s) | vs %016llx fs %016llx | "
+                 "%s count %u, %u instances | blend %u mask %08x | depth %s, test %d write %d | %d targets",
+                 i, c->nvn_format, c->width, c->height, (unsigned long long)c->addr, c->written ? "drawn before" : "new",
+                 (unsigned long long)vsh, (unsigned long long)fsh, p.index_type >= 0 ? "indexed" : "arrays", p.count,
+                 p.instances, st_.color.blend_enable, st_.channel.mask, depth ? "yes" : "no", st_.depth.depth_test,
+                 st_.depth.depth_write, st_.num_rt);
+        }
+    }
     VkPipeline WaitForOneShot(const std::vector<Image*>& colors, const Image* depth) {
         bool one_shot = false;
         for (const Image* c : colors)
