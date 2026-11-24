@@ -17,6 +17,9 @@ Maxwell shaders are translated to SPIR-V at runtime.
 > target of this fork, although upstream's Adreno support is still present. See
 > [What this fork changes](#what-this-fork-changes).
 
+**Download:** the built APK is attached to the [releases](https://github.com/SoTokcuk/dsr-native/releases)
+of this fork (`dsr-native-mali-g615-release.apk`, arm64-v8a, signed with the repository's debug key).
+
 ---
 
 ## What this project is
