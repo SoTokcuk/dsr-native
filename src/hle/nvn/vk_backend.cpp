@@ -572,6 +572,7 @@ struct Image {
     int clear_layer = 0, clear_level = 0;
     uint64_t serial = 0;      // unique per created image (a background conversion finds its image again)
     uint64_t upload_gen = 0;  // uploads so far (a conversion for an older upload is dropped)
+    bool presented = false;   // has been shown as the game's frame (Present): see sharp_hud
 };
 
 struct Shader {
@@ -642,6 +643,7 @@ public:
                     if (c.mask == 0 || c.index < 0 || c.index >= st_.num_rt) break;
                     if (Image* img = GetImage(st_.rts[c.index], false)) {
                         Begin();
+                        SharpWritten(img);
                         const int layer = st_.rts[c.index].layer, level = st_.rts[c.index].level;
                         if (!IsDepthFormat(img->nvn_format) && !capture_active_) {
                             VkClearValue v{};
@@ -1359,6 +1361,15 @@ public:
             SetWindowFrameRate();
         Image* src = tex.valid ? FindImage(tex) : nullptr;
         if (src && !(src->written && !IsDepthFormat(src->nvn_format))) src = nullptr;
+        // sharp_hud: the frame shown is the sharp image (the HUD drawn into it, or at least the frame enlarged into
+        // it), every frame, so the swapchain keeps one size.
+        if (src) {
+            src->presented = true;
+            if (sharp_w_ && src->width == sharp_rw_ && src->height == sharp_rh_)
+                if (Image* sh = SharpStart(*src)) src = sh;
+        }
+        sharp_ = {};
+        if (src && InOpenPass(src)) EndRendering();
         // The swapchain is sized for the game's frame (see EnsureSwapchain): a frame of another size remakes it.
         if (src && dsr::GetRuntime().config.compositor_scaling && (src->width != frame_w_ || src->height != frame_h_)) {
             frame_w_ = src->width;
@@ -1618,6 +1629,21 @@ private:
             hud_box_h_ = std::min(rh, hud_box_w_ * 9 / 16);
             LOGI(kTag, "aspect ratio: HUD and menus drawn in a centred %dx%d box of the %dx720 frame", hud_box_w_,
                  hud_box_h_, rw);
+        }
+        if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud) {
+            const int rw = rc.render_width, rh = rc.render_height;
+            const int target_h = std::min(rc.screen_height > 0 ? rc.screen_height : 1080, 1080);
+            if (rw > 0 && rh > 0 && target_h > rh) {
+                sharp_rw_ = rw;
+                sharp_rh_ = rh;
+                sharp_h_ = target_h;
+                sharp_w_ = std::min(4096, int(std::lround(double(target_h) * rw / rh)) & ~1);
+                LOGI(kTag, "sharp_hud (experimental): the game renders at %dx%d, its HUD, menus and text are drawn at %dx%d",
+                     rw, rh, sharp_w_, sharp_h_);
+            } else {
+                LOGI(kTag, "sharp_hud: off, the render size (%dx%d) is already as sharp as the screen allows (%d lines)", rw,
+                     rh, target_h);
+            }
         }
         if (en13.dynamicRendering && dsr::GetRuntime().config.render_pass_objects)
             LOGI(kTag, "settings render_pass_objects = 1: render pass objects instead of the driver's dynamic rendering");
@@ -3756,6 +3782,7 @@ private:
     }
     void ClearColorImage(Image& img, const uint32_t color[4], uint8_t kind, int layer = 0, int level = 0) {
         if (IsDepthFormat(img.nvn_format)) return;
+        SharpWritten(&img);
         Transition(img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkClearColorValue v;
         memcpy(v.uint32, color, sizeof(v.uint32));  // float/int/uint share the bits
@@ -3826,6 +3853,7 @@ private:
 
     void CopyImage(Image& src, const CopyRegion& sr, Image& dst, const CopyRegion& dr, int flags) {
         if (IsDepthFormat(src.nvn_format) != IsDepthFormat(dst.nvn_format)) return;
+        SharpWritten(&dst);
         auto clampw = [](int v, int def) { return v > 0 ? v : def; };
         int sw = clampw(sr.width, src.width), sh = clampw(sr.height, src.height);
         int dw = clampw(dr.width, dst.width), dh = clampw(dr.height, dst.height);
@@ -5185,6 +5213,39 @@ private:
         // The geometry cache was emptied during this draw (a new command buffer, other offsets now stale): redo it.
         if (geo_resets_ != geo_resets_before) return Draw(p);
         Phase(4);
+        // ---- sharp_hud: the HUD, menus and text into the sharp image ---------------------------------------------
+        // A frame the game shows (Present marked it) at the render size: its first HUD / menu draw (blending, the
+        // game's 1280x720 2D projection) enlarges the frame drawn so far into the sharp image (SharpStart), and that
+        // draw and every later one into the frame this frame go into the sharp image instead, positions scaled up
+        // (below). A draw that needs the frame's depth / stencil buffer cannot (it has the render size): the frame
+        // is then shown as the game drew it (sharp HUD dropped for that frame).
+        Image* sharp_src = nullptr;
+        if (sharp_w_ && !colors.empty() && colors[0] && colors[0]->presented && colors[0]->width == sharp_rw_ &&
+            colors[0]->height == sharp_rh_) {
+            bool only = true;
+            for (size_t i = 1; i < colors.size(); i++) only = only && !colors[i];
+            const bool active = sharp_.active && sharp_.src == colors[0] && sharp_.serial == colors[0]->serial;
+            bool hud = active;
+            if (!hud && only && (st_.color.blend_enable & 1)) {
+                float sx, sy;
+                hud = Projection2D(&sx, &sy) && std::fabs(sx - 2.0f / 1280.0f) < 1e-6f && std::fabs(sy + 2.0f / 720.0f) < 1e-6f;
+            }
+            if (hud && (!only || (depth && (st_.depth.depth_test || st_.depth.depth_write || st_.depth.stencil_test)))) {
+                if (active) {
+                    sharp_.active = false;
+                    sharp_dropped_++;
+                    LogOnce("sharp_drop", "sharp_hud: a draw into the frame after its HUD started needs %s: that frame "
+                            "is shown as the game drew it", only ? "the depth / stencil buffer" : "more render targets");
+                }
+            } else if (hud) {
+                if (Image* sh = SharpStart(*colors[0])) {
+                    sharp_src = colors[0];
+                    colors[0] = sh;
+                    depth = nullptr;
+                    sharp_draws_++;
+                }
+            }
+        }
         // ---- pipeline ----------------------------------------------------------------------------------------
         VkExtent2D extent;
         // Formats the pipeline renders to (dynamic rendering).
@@ -5244,17 +5305,19 @@ private:
         d.layout = layout;
         d.set_layouts[0] = vsl;
         d.set_layouts[1] = fsl;
-        DynamicState(extent, modes, &d.dyn);
+        // sharp_hud: viewport, scissor and HUD box worked out for the frame's own size, then scaled to the sharp image.
+        const VkExtent2D dyn_extent = sharp_src ? VkExtent2D{uint32_t(sharp_rw_), uint32_t(sharp_rh_)} : extent;
+        DynamicState(dyn_extent, modes, &d.dyn);
         // Other aspect ratios (aspect_ratio): the game lays its HUD and menus out for 1280x720 and stretches that
         // over the whole (wider or narrower) frame. Every draw made with that 1280x720 2D projection (several
         // shaders: quads, text, bars) goes into a centred 16:9 box instead: 1280x720 in the middle of wider frames,
         // the full width and 9/16 of it high on narrower ones, so the HUD keeps its shape and layout. Full-screen
         // quads (fades, dimming behind menus) still cover the whole frame.
-        if (hud_box_w_ && int(extent.height) == dsr::GetRuntime().config.render_height &&
-            int(extent.width) == dsr::GetRuntime().config.render_width && HudBoxed(p, vin)) {
-            const int fh = int(extent.height);
-            const float sx = float(hud_box_w_) / float(extent.width), sy = float(hud_box_h_) / float(fh);
-            const float x0 = float((int(extent.width) - hud_box_w_) / 2), y0 = float((fh - hud_box_h_) / 2);
+        if (hud_box_w_ && int(dyn_extent.height) == dsr::GetRuntime().config.render_height &&
+            int(dyn_extent.width) == dsr::GetRuntime().config.render_width && HudBoxed(p, vin)) {
+            const int fh = int(dyn_extent.height);
+            const float sx = float(hud_box_w_) / float(dyn_extent.width), sy = float(hud_box_h_) / float(fh);
+            const float x0 = float((int(dyn_extent.width) - hud_box_w_) / 2), y0 = float((fh - hud_box_h_) / 2);
             d.dyn.vp.x = x0 + d.dyn.vp.x * sx;
             d.dyn.vp.width *= sx;
             d.dyn.vp.y = y0 + d.dyn.vp.y * sy;
@@ -5264,14 +5327,14 @@ private:
             VkRect2D& sc = d.dyn.sc;
             float l = x0, t = y0, r = x0 + float(hud_box_w_), b = y0 + float(hud_box_h_);
             if (st_.scissor_set && st_.scissor[2] > 0 && st_.scissor[3] > 0 &&
-                !(st_.scissor[0] <= 0 && st_.scissor[1] <= 0 && st_.scissor[2] >= int(extent.width) &&
-                  st_.scissor[3] >= int(extent.height))) {
+                !(st_.scissor[0] <= 0 && st_.scissor[1] <= 0 && st_.scissor[2] >= int(dyn_extent.width) &&
+                  st_.scissor[3] >= int(dyn_extent.height))) {
                 const float kx = float(hud_box_w_) / 1280.0f, ky = float(hud_box_h_) / 720.0f;
                 l = std::max(l, x0 + float(st_.scissor[0]) * kx);
                 t = std::max(t, y0 + float(st_.scissor[1]) * ky);
                 // The game cuts its rectangles at the frame's edges (960 on a 4:3 frame, 540 high at a 0.75 render
                 // scale), which in layout units are not the layout's edges: one ending there runs to them.
-                const float right = st_.scissor[0] + st_.scissor[2] >= float(extent.width) - 0.5f
+                const float right = st_.scissor[0] + st_.scissor[2] >= float(dyn_extent.width) - 0.5f
                                         ? 1280.0f : st_.scissor[0] + st_.scissor[2];
                 const float bottom = st_.scissor[1] + st_.scissor[3] >= float(fh) - 0.5f
                                          ? 720.0f : st_.scissor[1] + st_.scissor[3];
@@ -5282,6 +5345,19 @@ private:
             sc.offset = {il, it};
             sc.extent = {uint32_t(std::max(0, ir - il)), uint32_t(std::max(0, ib - it))};
             hud_draws_boxed_++;
+        }
+        if (sharp_src) {
+            const float kx = float(extent.width) / float(sharp_rw_), ky = float(extent.height) / float(sharp_rh_);
+            d.dyn.vp.x *= kx;
+            d.dyn.vp.width *= kx;
+            d.dyn.vp.y *= ky;
+            d.dyn.vp.height *= ky;
+            VkRect2D& sc = d.dyn.sc;
+            const int l = int(std::floor(float(sc.offset.x) * kx)), t = int(std::floor(float(sc.offset.y) * ky));
+            const int r = std::min(int(extent.width), int(std::ceil(float(sc.offset.x + int(sc.extent.width)) * kx)));
+            const int b = std::min(int(extent.height), int(std::ceil(float(sc.offset.y + int(sc.extent.height)) * ky)));
+            sc.offset = {std::max(0, l), std::max(0, t)};
+            sc.extent = {uint32_t(std::max(0, r - sc.offset.x)), uint32_t(std::max(0, b - sc.offset.y))};
         }
         d.push[0] = st_.alpha_ref;
         d.indexed = use_indices;
@@ -6649,6 +6725,11 @@ private:
         fence_retries_ = 0;
         gpu_busy_ms_ = 0;
         stat_lists_ = list_counter_;
+        if (sharp_w_)
+            LOGI(kTag, "sharp_hud: last 10 s: %llu draws into the sharp image, %llu frames enlarged again after a clear / "
+                 "copy, %llu frames shown without (a later draw needed the frame's depth buffer)",
+                 (unsigned long long)sharp_draws_, (unsigned long long)sharp_restarts_, (unsigned long long)sharp_dropped_);
+        sharp_draws_ = sharp_restarts_ = sharp_dropped_ = 0;
         prehash_used_ = prehash_inline_ = 0;
         if (geo_buf_) {
             LOGI(kTag, "geometry cache: %llu reused, %llu copied (%.1f MB), %llu volatile (streamed), %.0f of %llu MB used, "
@@ -7041,6 +7122,90 @@ private:
     bool mip_skip_ = false;      // settings texture_mip_skip
     uint64_t mip_skipped_ = 0;   // images created without their top level
     int hud_box_w_ = 0, hud_box_h_ = 0;
+    // ---- sharp_hud (experimental) -----------------------------------------------------------------------------
+    // With a render scale the game draws its HUD, menus and text at the render size too (blurry once enlarged to the
+    // screen). Here they go into a "sharp" image the size of the screen (up to 1080 lines) instead: the game's frame
+    // (3D and post-processing, still at the render size) is enlarged into it when its first HUD draw comes (see
+    // Draw), and the sharp image is what is shown. One per frame image of the game (it shows 2-3 in turn).
+    int sharp_w_ = 0, sharp_h_ = 0;    // the sharp image's size; 0 = off
+    int sharp_rw_ = 0, sharp_rh_ = 0;  // the game's frame size
+    struct SharpFrame {
+        bool active = false;  // this frame's HUD is being drawn into img (cleared at each Present)
+        Image* src = nullptr;
+        uint64_t serial = 0;
+        Image* img = nullptr;
+    } sharp_;
+    std::unordered_map<uint64_t, Image> sharp_imgs_;  // by the game frame image's serial
+    uint64_t sharp_draws_ = 0, sharp_dropped_ = 0, sharp_restarts_ = 0;
+    Image* SharpImage(const Image& src) {
+        auto it = sharp_imgs_.find(src.serial);
+        if (it != sharp_imgs_.end() && it->second.image && it->second.vk_format == src.vk_format) return &it->second;
+        if (it != sharp_imgs_.end()) {
+            DestroyImage(it->second);
+            sharp_imgs_.erase(it);
+        }
+        constexpr VkFormatFeatureFlags kNeed = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        if ((src.features & kNeed) != kNeed || src.type != VK_IMAGE_TYPE_2D) {
+            LogOnce("sharp_fmt", "sharp_hud: the game's frame (format %d) cannot be enlarged here: off", src.nvn_format);
+            sharp_w_ = 0;
+            return nullptr;
+        }
+        // Frame images the game no longer has (re-created ones get a new serial): their sharp images go.
+        if (sharp_imgs_.size() >= 4) {
+            sharp_ = {};
+            for (auto& [serial, im] : sharp_imgs_) DestroyImage(im);
+            sharp_imgs_.clear();
+        }
+        Image img;
+        img.nvn_format = src.nvn_format;
+        img.target = kTarget2D;
+        img.vk_format = src.vk_format;
+        img.twin = src.twin;
+        img.width = sharp_w_;
+        img.height = sharp_h_;
+        img.aspect = src.aspect;
+        img.features = src.features;
+        img.type = VK_IMAGE_TYPE_2D;
+        if (!AllocImage(img, false, src.mutable_fmt, &img.image, &img.memory)) {
+            sharp_w_ = 0;
+            return nullptr;
+        }
+        img.serial = ++image_serial_;
+        img.written = true;
+        LOGI(kTag, "sharp_hud: sharp image %dx%d for the game's %dx%d frame (format %d)", img.width, img.height, src.width,
+             src.height, src.nvn_format);
+        return &(sharp_imgs_[src.serial] = img);
+    }
+    // The sharp image for frame image src, holding the frame as drawn so far (enlarged into it when this frame's
+    // HUD starts); null if there is none (sharp_hud off, or the format cannot be enlarged).
+    Image* SharpStart(Image& src) {
+        if (sharp_.active && sharp_.src == &src && sharp_.serial == src.serial && sharp_.img) return sharp_.img;
+        Image* sh = SharpImage(src);
+        if (!sh) return nullptr;
+        if (InOpenPass(&src) || InOpenPass(sh)) EndRendering();
+        Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Transition(*sh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit b{};
+        b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.srcOffsets[1] = {src.width, src.height, 1};
+        b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        b.dstOffsets[1] = {sh->width, sh->height, 1};
+        Rec([b, si = src.image, di = sh->image](VkCommandBuffer cb) {
+            vkCmdBlitImage(cb, si, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, di, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b,
+                           VK_FILTER_LINEAR);
+        });
+        barriers_ += 2;
+        if (sharp_.src == &src && sharp_.serial == src.serial) sharp_restarts_++;  // the frame changed after its HUD began
+        sharp_ = {true, &src, src.serial, sh};
+        return sh;
+    }
+    // The game cleared or copied into image img: if this frame's HUD went into a sharp image, that is out of date
+    // (the next HUD draw enlarges the frame again).
+    void SharpWritten(const Image* img) {
+        if (sharp_.active && sharp_.src == img) sharp_.active = false;
+    }
     std::unordered_set<uint64_t> hud_box_logged_;
     uint64_t hud_full_screen_ = 0;
     uint64_t hud_draws_boxed_ = 0;
