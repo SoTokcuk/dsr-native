@@ -512,6 +512,9 @@ public final class SettingsMenu {
         choice("shadow_quality", Strings.t("shq_t"), Strings.t("shq_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2", "3"},
                 new String[] {Strings.t("shq_off"), Strings.t("shq_low"), Strings.t("shq_med"), Strings.t("shq_high")}, "3");
+        choice("anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
+                new String[] {"-1", "0", "2", "4", "8", "16"},
+                new String[] {Strings.t("aniso_game"), Strings.t("off"), "2x", "4x", "8x", "16x"}, "-1");
         toggle("lighter_post_fx", Strings.t("post_t"), Strings.t("post_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
 
@@ -787,7 +790,7 @@ public final class SettingsMenu {
                     return;
                 }
                 mValues.put("render_scale", v);
-                Toast.makeText(mA, Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
+                toast(Strings.t("changes_next"));
             }
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -837,7 +840,7 @@ public final class SettingsMenu {
             }
             mValues.put("touch_layout", "");
             TouchControls.setLayout("");
-            Toast.makeText(mA, Strings.t("layout_reset_done"), Toast.LENGTH_SHORT).show();
+            toast(Strings.t("layout_reset_done"));
         });
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -911,7 +914,7 @@ public final class SettingsMenu {
                         return;
                     }
                     storePresets(mA, presets);
-                    Toast.makeText(mA, Strings.t("preset_saved", n), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_saved", n));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNegativeButton(Strings.t("cancel"), null)
@@ -929,14 +932,14 @@ public final class SettingsMenu {
                     }
                     mValues.put("touch_layout", layout);
                     TouchControls.setLayout(layout);
-                    Toast.makeText(mA, Strings.t("preset_loaded", name), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_loaded", name));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNeutralButton(Strings.t("preset_delete"), (dlg, w) -> {
                     JSONObject presets = loadPresets(mA);
                     presets.remove(name);
                     storePresets(mA, presets);
-                    Toast.makeText(mA, Strings.t("preset_deleted", name), Toast.LENGTH_SHORT).show();
+                    toast(Strings.t("preset_deleted", name));
                     if (mTab == TAB_TOUCH) showTab(TAB_TOUCH);
                 })
                 .setNegativeButton(Strings.t("cancel"), null)
@@ -1111,7 +1114,7 @@ public final class SettingsMenu {
                     } catch (Throwable e) {
                         ok = false;
                     }
-                    if (ok) Toast.makeText(mA, Strings.t("preset_deleted", name), Toast.LENGTH_SHORT).show();
+                    if (ok) toast(Strings.t("preset_deleted", name));
                     else popup(Strings.t("tab_cheats"), Strings.t("cheat_del_failed"));
                     if (mTab == TAB_CHEATS) showTab(TAB_CHEATS);
                 })
@@ -1218,7 +1221,7 @@ public final class SettingsMenu {
         if (bad > 0)
             popup(Strings.t("tab_cheats"), Strings.t("cheats_added_bad", added, bad));
         else
-            Toast.makeText(mA, Strings.t("cheats_added", added), Toast.LENGTH_SHORT).show();
+            toast(Strings.t("cheats_added", added));
     }
 
     // ---- Language tab -------------------------------------------------------------------------------------------
@@ -1252,7 +1255,7 @@ public final class SettingsMenu {
                         }
                     }
                 });
-                Toast.makeText(mA, Strings.t("lang_changed"), Toast.LENGTH_SHORT).show();
+                toast(Strings.t("lang_changed"));
             });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1472,7 +1475,7 @@ public final class SettingsMenu {
         }
         if (key.equals("aspect_ratio")) updateScaleLabel(parse(mValues.get("render_scale"), 1.0f));
         // Settings that apply at the next start say so in their note: a short toast, not a dialog to dismiss each time.
-        Toast.makeText(mA, now ? Strings.t("applied", title) : Strings.t("changes_next"), Toast.LENGTH_SHORT).show();
+        toast(now ? Strings.t("applied", title) : Strings.t("changes_next"));
     }
 
     private void cantSave() {
@@ -1541,6 +1544,16 @@ public final class SettingsMenu {
             c.setLayoutParams(lp);
         }
         return c;
+    }
+
+    // One message at a time: a new one replaces the one on screen (Android queues toasts, so changing several settings
+    // in a row showed "Changes at the next start" again and again long after).
+    private Toast mToast;
+
+    private void toast(String text) {
+        if (mToast != null) mToast.cancel();
+        mToast = Toast.makeText(mA, text, Toast.LENGTH_SHORT);
+        mToast.show();
     }
 
     private void popup(String title, String message) {

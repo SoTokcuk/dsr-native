@@ -130,6 +130,10 @@ struct RuntimeConfig {
     // skip_intro = 1: the company logos at the start are skipped (straight to the title movie).
     bool skip_intro = false;
     int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
+    // anisotropy (settings menu "Anisotropic filtering"): -1 = as the game asks, 0 = off, 2 / 4 / 8 / 16 = that level on
+    // every mipmapped, linearly filtered texture (capped at the GPU's limit). Sharper textures at grazing angles
+    // (floors, walls, roads) for some GPU time.
+    int anisotropy = -1;
     bool fast_cores = true;  // keep the game's frame-critical threads off the efficiency cores
     bool record_thread = true;  // record Vulkan commands on a second thread (draw preparation stays on the render thread)
     bool pin_render_thread = false;  // keep the render thread on the fastest CPU core(s) (slower on 8 Gen 2: off)

@@ -3210,7 +3210,19 @@ private:
         ci.mipLodBias = s.lod_bias;
         ci.minLod = std::max(0.0f, s.lod_min);
         ci.maxLod = (s.min_filter <= 1) ? 0.25f : std::max(ci.minLod, std::min(s.lod_max, 16.0f));
-        if (filterable && features_.samplerAnisotropy && s.max_anisotropy > 1.0f) {
+        // Settings anisotropy 0 / 2-16: the player's choice instead of the game's, on mipmapped linear samplers (the
+        // world's textures; the HUD's single-level ones and nearest-filtered lookups are left as they are).
+        const int aniso_force = dsr::GetRuntime().config.anisotropy;
+        const bool mipmapped_linear = ci.minFilter == VK_FILTER_LINEAR && s.min_filter >= 2 && ci.maxLod > 0.25f;
+        if (aniso_force >= 0 && filterable && !shadow && mipmapped_linear) {
+            if (aniso_force >= 2 && features_.samplerAnisotropy) {
+                ci.anisotropyEnable = VK_TRUE;
+                ci.maxAnisotropy = std::min(float(aniso_force), props_.limits.maxSamplerAnisotropy);
+            }
+            LogOnce(("anisoset" + std::to_string(int(s.max_anisotropy))).c_str(),
+                    "settings anisotropy %d: a sampler the game set to %.0fx uses %.0fx", aniso_force, s.max_anisotropy,
+                    ci.anisotropyEnable ? ci.maxAnisotropy : 1.0f);
+        } else if (filterable && features_.samplerAnisotropy && s.max_anisotropy > 1.0f) {
             ci.anisotropyEnable = VK_TRUE;
             ci.maxAnisotropy = std::min(s.max_anisotropy, props_.limits.maxSamplerAnisotropy);
             // `max_anisotropy` (settings): a lower limit than the game's, for slower GPUs (0 = the game's).
