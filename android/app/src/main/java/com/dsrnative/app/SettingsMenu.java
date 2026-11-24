@@ -522,6 +522,8 @@ public final class SettingsMenu {
         choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2"},
                 new String[] {Strings.t("off"), Strings.t("hidden_gentle"), Strings.t("hidden_aggr")}, "0");
+        toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
+                "0");
         // Mali fixes: settings for GPUs such as Mali (no BC textures, tile-based), folded away by default.
         final int maliFirst = mBody.getChildCount() + 1;  // after the group's header row
         TextView maliHeader = subsection(Strings.t("sec_mali"));
@@ -530,8 +532,6 @@ public final class SettingsMenu {
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_next"),
                 new String[] {"4", "6", "8"}, new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
-        toggle("texture_mip_skip", Strings.t("mip_t"), Strings.t("mip_n") + " " + Strings.t("changes_next"), "1", "0",
-                "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_next"), "1", "0", "0");
