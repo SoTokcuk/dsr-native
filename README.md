@@ -17,6 +17,18 @@ Early development. Expect visual bugs and minor performance issues. Base v1.0.0 
 
 Tested with an AYN Thor, a OnePlus 6T, and MuMuPlayer using a 4:3 aspect ratio. Snapdragon chips should be fully supported along with Adreno 6xx, 7xx, and 8xx gpus.
 
+### Mali performance build
+
+This branch is tuned for ARM Mali first (tested target: Mali-G615 MC6 in the Xiaomi 14T). Adreno support is not a goal. What differs from upstream:
+
+- **AFBC kept on**: images get the storage and mutable-format usages only when the game actually needs them (Mali AFBC is off for storage images on every Mali, and for mutable-format images before Valhall). Vulkan 1.1 Mali drivers also enable `VK_KHR_image_format_list`.
+- **Mali tile barriers on by default** (`mali_barriers`): narrow layout transitions and render targets readable as their pass ends, so the tile GPU can overlap passes.
+- **BC3 textures as ETC2 RGBA8** (`bc3_etc2`): 4x less texture memory and bandwidth than RGBA8, slightly lossy.
+- **Depth**: NVN depth-stencil 51/54 use 24-bit `D24_UNORM_S8_UINT` first on Mali (half the bytes of D32F+S8, and on Arm's AFBC format list).
+- **1024 shadow maps** (`shadow_quality = 2`) and **4x anisotropy cap** (`max_anisotropy = 4`).
+
+The two most useful switches when something looks wrong are in *Settings → GPU → Mali fixes*: **Mali AFBC** (off -> images are created with every usage up front, no compression) and **Render pass objects** (draw through `VkRenderPass` instead of dynamic rendering; try it if textures or effects flicker on a Mali GPU). The same options exist in `settings.txt` as `mali_afbc`, `image_format_list`, `mali_barriers`, `bc3_etc2`, `shadow_quality`, `max_anisotropy` and `render_pass_objects`.
+
 
 
 

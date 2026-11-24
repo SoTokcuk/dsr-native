@@ -511,7 +511,7 @@ public final class SettingsMenu {
         toggle("fsr", Strings.t("fsr_t"), Strings.t("fsr_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("shadow_quality", Strings.t("shq_t"), Strings.t("shq_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2", "3"},
-                new String[] {Strings.t("shq_off"), Strings.t("shq_low"), Strings.t("shq_med"), Strings.t("shq_high")}, "3");
+                new String[] {Strings.t("shq_off"), Strings.t("shq_low"), Strings.t("shq_med"), Strings.t("shq_high")}, "2");
         choice("anisotropy", Strings.t("aniso_t"), Strings.t("aniso_n") + " " + Strings.t("changes_next"),
                 new String[] {"-1", "0", "2", "4", "8", "16"},
                 new String[] {Strings.t("aniso_game"), Strings.t("off"), "2x", "4x", "8x", "16x"}, "-1");
@@ -529,16 +529,20 @@ public final class SettingsMenu {
         // Mali fixes: settings for GPUs such as Mali (no BC textures, tile-based), folded away by default.
         final int maliFirst = mBody.getChildCount() + 1;  // after the group's header row
         TextView maliHeader = subsection(Strings.t("sec_mali"));
+        // The three options that make this a Mali build come first (on by default); the note then introduces the
+        // experimental ones below it, which stay off unless the player is testing.
+        toggle("mali_afbc", Strings.t("afbc_t"), Strings.t("afbc_n") + " " + Strings.t("changes_next"), "1", "0", "1");
+        toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "1");
+        toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
+                "1");
         note(Strings.t("gpu_n"));
-        toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("astc_block", Strings.t("astcb_t"), Strings.t("astcb_n") + " " + Strings.t("changes_next"),
                 new String[] {"4", "6", "8"}, new String[] {Strings.t("astcb_4"), Strings.t("astcb_6"), Strings.t("astcb_8")}, "4");
-        toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
-                "0");
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("mali_tile_turbo", Strings.t("turbo_t"), Strings.t("turbo_n") + " " + Strings.t("changes_next"), "1",
                 "0", "0");
+        toggle("render_pass_objects", Strings.t("rpobj_t"), Strings.t("rpobj_n"), "1", "0", "0");
         foldable(maliHeader, Strings.t("sec_mali"), maliFirst, mBody.getChildCount());
     }
 

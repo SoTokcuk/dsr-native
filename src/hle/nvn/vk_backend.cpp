@@ -1559,6 +1559,12 @@ private:
         LOGI(kTag, "GPU: %s, Vulkan %u.%u.%u, driver 0x%x (%u.%u)", props_.deviceName, VK_VERSION_MAJOR(props_.apiVersion),
              VK_VERSION_MINOR(props_.apiVersion), VK_VERSION_PATCH(props_.apiVersion), props_.driverVersion,
              VK_VERSION_MAJOR(props_.driverVersion), VK_VERSION_MINOR(props_.driverVersion));
+        // ARM Mali: tile-based, with Arm Frame Buffer Compression. Two things follow for the device set-up below:
+        // AFBC is off for images with the storage usage (every GPU) and for mutable-format images on GPUs before
+        // Valhall, so images are kept free of both until the game needs them (lean_images_), and on Vulkan 1.1 the
+        // format list that keeps compression on format views comes from VK_KHR_image_format_list.
+        mali_ = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
+        if (mali_) LOGI(kTag, "Mali GPU: tile-based profile (compression-friendly images)");
         // Qualcomm's Adreno 6xx drivers (512.x before 512.514) do not expose the BC texture formats the GPU
         // supports; BCeNabler (libadrenotools) patches the driver in memory to expose them, which saves the
         // software decoding (and BC6H/BC7 then look right).
@@ -1627,18 +1633,30 @@ private:
         const char* dev_ext[2] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, nullptr};
         uint32_t ndev_ext = 1;
         // Image format lists (core in 1.2): with them, sRGB/linear-viewable images keep their compression.
-        format_list_ = VK_API_VERSION_MINOR(props_.apiVersion) >= 2;
-        if (false) {  // VK_KHR_image_format_list on Vulkan 1.1 (Adreno 630): glitches (purple streaks); not used
+        // settings image_format_list: -1 = auto, 0 = off, 1 = also on other Vulkan 1.1 drivers.
+        const int fl_mode = dsr::GetRuntime().config.format_list;
+        format_list_ = fl_mode >= 0 ? fl_mode != 0 : VK_API_VERSION_MINOR(props_.apiVersion) >= 2;
+        if (!format_list_ && fl_mode != 0) {
+            // Mali Vulkan 1.1 drivers (r18-r3x, most Helio / Dimensity phones): core image format lists are only in
+            // Vulkan 1.2. The list lets the driver keep an image's compression when the game views it in both its sRGB
+            // and its linear form (and skip the decompress/recompress on the switch), which matters on the bandwidth-
+            // and power-limited Mali parts. Not every driver has the extension, and it is not used on Adreno (purple
+            // streaks on the 630), so it is enabled only when the driver lists it and the GPU is Mali (or forced).
             uint32_t n = 0;
             vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, nullptr);
             std::vector<VkExtensionProperties> exts(n);
             vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, exts.data());
             for (const VkExtensionProperties& e : exts)
                 if (!strcmp(e.extensionName, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME)) {
-                    dev_ext[ndev_ext++] = VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME;
-                    format_list_ = true;
+                    if (mali_ || fl_mode == 1) {
+                        dev_ext[ndev_ext++] = VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME;
+                        format_list_ = true;
+                    }
+                    break;
                 }
-            LOGI(kTag, "image format lists: %s", format_list_ ? "VK_KHR_image_format_list" : "not available");
+            LOGI(kTag, "image format lists: %s", format_list_ ? "VK_KHR_image_format_list" : "not used");
+        } else if (fl_mode == 0) {
+            LOGI(kTag, "image format lists: off (settings image_format_list = 0)");
         }
         VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         dci.pNext = &en2;
@@ -1702,18 +1720,26 @@ private:
         if (mali_barriers_)
             LOGI(kTag, "settings mali_barriers = 1: narrow layout barriers, render targets readable when their pass ends");
         // mali_tile_turbo (experimental, Mali only; from PR #73 by Dann-os3d): see LayoutScope.
-        const bool is_mali = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
-        tile_turbo_ = dsr::GetRuntime().config.mali_tile_turbo && is_mali;
+        tile_turbo_ = dsr::GetRuntime().config.mali_tile_turbo && mali_;
         if (tile_turbo_)
             LOGI(kTag, "settings mali_tile_turbo = 1: layout-scoped barriers (unknown layouts keep the full barrier)");
         else if (dsr::GetRuntime().config.mali_tile_turbo)
             LOGI(kTag, "settings mali_tile_turbo = 1 ignored: not a Mali GPU");
+        // Mali (tile-based, AFBC): images are created without the storage usage and without the mutable-format flag
+        // unless the game actually needs them (CreateImage, AddStorage, MakeMutable). Either usage turns Arm's frame
+        // buffer compression off for the image, and the compression is what the bandwidth- and power-limited Mali
+        // parts gain the most from. An image later bound as a storage image or viewed in its sRGB/linear twin is
+        // re-created once with that usage, as on the older Adreno GPUs (see AddStorage / MakeMutable).
+        lean_images_ = (mali_ && dsr::GetRuntime().config.mali_afbc) || dsr::GetRuntime().config.gpu_compression;
+        if (mali_ && lean_images_)
+            LOGI(kTag, "Mali GPU: storage / mutable-format usage only on the images that need it (AFBC kept)");
+        else if (mali_ && !dsr::GetRuntime().config.mali_afbc)
+            LOGI(kTag, "Mali GPU: every image gets the storage and mutable-format usages (settings mali_afbc = 0)");
         if (!begin_rendering_ || !end_rendering_) {
             // Older drivers (Vulkan 1.1, e.g. Adreno 6xx on Android 10/11): render pass and framebuffer objects.
             begin_rendering_ = nullptr;
             end_rendering_ = nullptr;
             rp_fallback_ = true;
-            lean_images_ = dsr::GetRuntime().config.gpu_compression;
             LOGI(kTag, "no dynamic rendering: using render pass objects instead%s",
                  lean_images_ ? "; storage usage only on images written as storage images" : "");
         }
@@ -1742,7 +1768,10 @@ private:
                 VkQueryPoolCreateInfo oi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 oi.queryType = VK_QUERY_TYPE_OCCLUSION;
                 oi.queryCount = kOccQueries;
-                if (vkCreateQueryPool(device_, &oi, nullptr, &sl.occ) != VK_SUCCESS) sl.occ = VK_NULL_HANDLE;
+                if (vkCreateQueryPool(device_, &oi, nullptr, &sl.occ) != VK_SUCCESS) {
+                    sl.occ = VK_NULL_HANDLE;
+                    LogOnce("occpool", "skip_hidden: occlusion query pools could not be created: nothing is skipped");
+                }
             }
             desc_pool_ = MakeDescriptorPool();
             if (!CreateStream() || !desc_pool_) return false;
@@ -2254,16 +2283,34 @@ private:
                                                                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
         VkFormat chosen = VK_FORMAT_UNDEFINED;
         VkFormatFeatureFlags feats = 0;
-        for (VkFormat f : ImageCandidates(nvn_format)) {
-            VkFormatProperties p;
-            vkGetPhysicalDeviceFormatProperties(phys_, f, &p);
-            // Driver patched by BCeNabler: BC images work, though the format query still reports nothing.
-            if (bc_forced_ && BcKindOf(nvn_format) != BcKind::None)
-                p.optimalTilingFeatures |= need | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-            if ((p.optimalTilingFeatures & need) == need) {
-                chosen = f;
-                feats = p.optimalTilingFeatures;
-                break;
+        std::vector<VkFormat> candidates = ImageCandidates(nvn_format);
+        if (mali_ && (nvn_format == 51 || nvn_format == 54)) {
+            // Arm's frame buffer compression list has D24_UNORM_S8_UINT (4 bytes) but not D32F+S8 (8 bytes): on Mali
+            // the smaller depth format keeps the main depth buffer and the shadow maps compressed and halves their
+            // bandwidth. 24 bits are plenty for the game's 720p depth range.
+            auto at = std::find(candidates.begin(), candidates.end(), VK_FORMAT_D24_UNORM_S8_UINT);
+            if (at != candidates.end() && at != candidates.begin()) std::rotate(candidates.begin(), at, at + 1);
+        }
+        // Depth images are also sampled (shadow maps, the depth copies some effects read), so a format that can only
+        // be a depth attachment is the wrong pick when the GPU offers one that can be sampled too: D32F+S8, for
+        // example, has no sampled-image support on some GPUs. Prefer such a format; when every candidate is
+        // attachment-only, still take one (a depth buffer that cannot be sampled beats none at all). A stencil-only
+        // format (S8) is not affected: nothing samples it, so its own tiny format stays.
+        const bool sampled_depth = IsDepthFormat(nvn_format) && HasDepth(nvn_format);
+        const int passes = sampled_depth ? 2 : 1;
+        for (int pass = 0; pass < passes && chosen == VK_FORMAT_UNDEFINED; pass++) {
+            const VkFormatFeatureFlags req = sampled_depth && pass == 0 ? need | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT : need;
+            for (VkFormat f : candidates) {
+                VkFormatProperties p;
+                vkGetPhysicalDeviceFormatProperties(phys_, f, &p);
+                // Driver patched by BCeNabler: BC images work, though the format query still reports nothing.
+                if (bc_forced_ && BcKindOf(nvn_format) != BcKind::None)
+                    p.optimalTilingFeatures |= need | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+                if ((p.optimalTilingFeatures & req) == req) {
+                    chosen = f;
+                    feats = p.optimalTilingFeatures;
+                    break;
+                }
             }
         }
         if (chosen == VK_FORMAT_UNDEFINED && BcKindOf(nvn_format) != BcKind::None) {
@@ -7133,8 +7180,9 @@ private:
     PFN_vkCmdEndRendering end_rendering_ = nullptr;
     bool rp_fallback_ = false;  // no dynamic rendering: VkRenderPass + VkFramebuffer per pass
     bool format_list_ = false;  // VkImageFormatListCreateInfo usable (Vulkan 1.2 or VK_KHR_image_format_list)
-    // Older GPUs (Adreno 6xx): images get VK_IMAGE_USAGE_STORAGE_BIT only once written as storage images, since
-    // the usage turns off their bandwidth compression. storage_addrs_: the game addresses of those.
+    bool mali_ = false;         // ARM Mali (tile-based): set from the GPU name / vendor in EnsureDevice
+    // Older GPUs (Adreno 6xx, Mali): images get VK_IMAGE_USAGE_STORAGE_BIT only once written as storage images, since
+    // the usage turns off their bandwidth compression (UBWC, AFBC). storage_addrs_: the game addresses of those.
     bool lean_images_ = false;
     std::unordered_set<uint64_t> storage_addrs_, mutable_addrs_;
     int recreated_ = 0;

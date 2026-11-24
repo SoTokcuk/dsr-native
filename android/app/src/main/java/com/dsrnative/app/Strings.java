@@ -367,6 +367,33 @@ final class Strings {
                 "Mali GPU 전용: 렌더링 단계 사이의 GPU 동기화를 가볍게 하여 프레임 속도가 오를 수 있습니다. 깜박이거나 검게 되거나 사라지면 끄세요.",
                 "仅限 Mali GPU：减轻渲染步骤之间的 GPU 同步，可能提高帧率。如果画面闪烁、变黑或消失，请关闭。",
                 "僅限 Mali GPU：減輕繪製步驟之間的 GPU 同步，可能提高影格率。如果畫面閃爍、變黑或消失，請關閉。");
+        put("afbc_t", "Mali AFBC", "Mali AFBC", "Mali AFBC", "Mali AFBC", "Mali AFBC", "Mali AFBC", "Mali AFBC",
+                "Mali AFBC", "Mali AFBC", "Mali AFBC", "Mali AFBC");
+        put("afbc_n", "Mali GPUs only: keeps the GPU's frame buffer compression on by adding the storage and sRGB/linear-view usages to an image only when the game needs them. Less memory bandwidth and power. Turn off if textures or effects look wrong.",
+                "GPU Mali uniquement : garde la compression de l'image (AFBC) du GPU en n'ajoutant les usages stockage et vue sRGB/linéaire que lorsque le jeu en a besoin. Moins de bande passante et d'énergie. Désactivez si les textures ou les effets sont incorrects.",
+                "Nur Mali-GPUs: hält die Framebuffer-Kompression (AFBC) aktiv, indem die Storage- und sRGB/Linear-Ansichts-Nutzung nur dann zum Bild hinzugefügt wird, wenn das Spiel sie braucht. Weniger Speicherbandbreite und Leistungsaufnahme. Ausschalten, wenn Texturen oder Effekte falsch aussehen.",
+                "Solo GPU Mali: mantiene attiva la compressione del framebuffer (AFBC) aggiungendo gli usi storage e vista sRGB/lineare a un'immagine solo quando il gioco ne ha bisogno. Meno banda di memoria e consumi. Disattiva se texture o effetti appaiono errati.",
+                "Solo GPU Mali: mantiene activa la compresión del framebuffer (AFBC) añadiendo los usos de almacenamiento y vista sRGB/lineal a una imagen solo cuando el juego los necesita. Menos ancho de banda y consumo. Desactívalo si las texturas o los efectos se ven mal.",
+                "Somente GPUs Mali: mantém ativa a compressão do framebuffer (AFBC) adicionando os usos de armazenamento e visualização sRGB/linear a uma imagem apenas quando o jogo precisa. Menos largura de banda e consumo. Desligue se texturas ou efeitos parecerem errados.",
+                "Только GPU Mali: сохраняет включённым сжатие кадрового буфера (AFBC): пометки об использовании как storage-изображения и sRGB/линейного представления добавляются к изображению только когда они нужны игре. Меньше нагрузки на память и меньше энергопотребления. Выключите, если текстуры или эффекты выглядят неправильно.",
+                "Mali GPU のみ：ゲームが必要としたときだけストレージ用途と sRGB/リニア表示用途を画像に追加し、GPU のフレームバッファ圧縮 (AFBC) を有効に保ちます。メモリ帯域と消費電力を抑えます。テクスチャやエフェクトがおかしい場合はオフにしてください。",
+                "Mali GPU 전용: 게임이 필요로 할 때만 스토리지 및 sRGB/선형 보기 용도를 이미지에 추가하여 GPU 프레임 버퍼 압축(AFBC)을 유지합니다. 메모리 대역폭과 전력을 절약합니다. 텍스처나 효과가 이상하면 끄세요.",
+                "仅限 Mali GPU：只在游戏需要时才为图像添加存储和 sRGB/线性视图用途，从而保持 GPU 的帧缓冲压缩 (AFBC)。减少内存带宽和功耗。如果纹理或特效异常，请关闭。",
+                "僅限 Mali GPU：只在遊戲需要時才為圖像加入儲存與 sRGB/線性檢視用途，從而保持 GPU 的畫面緩衝壓縮 (AFBC)。減少記憶體頻寬與功耗。若紋理或特效異常，請關閉。");
+        put("rpobj_t", "Render pass objects", "Objets de passe de rendu", "Render-Pass-Objekte",
+                "Oggetti render pass", "Objetos de render pass", "Objetos de render pass",
+                "Объекты проходов отрисовки", "レンダーパスオブジェクト", "렌더 패스 객체", "渲染通道对象", "繪製通道物件");
+        put("rpobj_n", "Draws through render pass objects instead of the driver's dynamic rendering. Try it if textures or effects flicker on a Mali GPU. Changes at the next start.",
+                "Dessine via des objets de passe de rendu au lieu du rendu dynamique du pilote. À essayer si des textures ou des effets clignotent sur un GPU Mali. Change au prochain démarrage.",
+                "Zeichnet über Render-Pass-Objekte statt über das dynamische Rendering des Treibers. Hilft, wenn Texturen oder Effekte auf einer Mali-GPU flackern. Ändert sich beim nächsten Start.",
+                "Disegna tramite oggetti render pass invece del rendering dinamico del driver. Provalo se texture o effetti sfarfallano su una GPU Mali. Cambia al prossimo avvio.",
+                "Dibuja mediante objetos de render pass en lugar del renderizado dinámico del controlador. Pruébalo si las texturas o los efectos parpadean en una GPU Mali. Cambia en el próximo inicio.",
+                "Desenha com objetos de render pass em vez do renderização dinâmica do driver. Experimente se texturas ou efeitos piscarem numa GPU Mali. Muda no próximo início.",
+                "Рисует через объекты проходов отрисовки вместо динамической отрисовки драйвера. Попробуйте, если текстуры или эффекты мерцают на GPU Mali. Меняется при следующем запуске.",
+                "ドライバーのダイナミックレンダリングの代わりにレンダーパスオブジェクトで描画します。Mali GPU でテクスチャやエフェクトがちらつく場合にお試しください。次回起動時に反映されます。",
+                "드라이버의 동적 렌더링 대신 렌더 패스 객체로 그립니다. Mali GPU에서 텍스처나 효과가 깜박이면 사용해 보세요. 다음 시작 시 적용됩니다.",
+                "使用渲染通道对象绘制，而不是驱动的动态渲染。如果 Mali GPU 上纹理或特效闪烁，请尝试。下次启动时生效。",
+                "使用繪製通道物件繪製，而不是驅動的動態繪製。如果 Mali GPU 上紋理或特效閃爍，請嘗試。下次啟動時生效。");
         put("aspect_t", "Aspect ratio (experimental)", "Format d'image (expérimental)",
                 "Seitenverhältnis (experimentell)", "Proporzioni (sperimentale)", "Relación de aspecto (experimental)",
                 "Proporção de tela (experimental)", "Соотношение сторон (экспериментально)", "アスペクト比（試験的）",

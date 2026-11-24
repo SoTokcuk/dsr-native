@@ -48,6 +48,14 @@ struct RuntimeConfig {
     // Older Adreno GPUs: storage usage and mutable format only where needed, so images keep their bandwidth
     // compression. Off by default: purple streaks on the OnePlus 6T (Adreno 630) for ~5% less GPU time.
     bool gpu_compression = false;
+    // mali_afbc (Mali, on by default): the same lean images as gpu_compression. AFBC (Arm's frame buffer compression)
+    // is always off for storage images and off for mutable-format images on GPUs before Valhall, so an image gets
+    // either usage only once the game actually needs it (re-created once). 0: every image gets both usages up front
+    // (no AFBC; for a driver that misbehaves when an image is re-created).
+    bool mali_afbc = true;
+    // image_format_list: -1 = auto (core in Vulkan 1.2, else VK_KHR_image_format_list on Mali), 0 = never (an image
+    // viewed in both its sRGB and linear form then loses its compression), 1 = also on other Vulkan 1.1 drivers.
+    int format_list = -1;
     // Aspect ratio of the game's handheld (720p) output: "16:9" (the game's own), "auto" (the screen's, from
     // screen_aspect) or "W:H". Experimental: widens the display resolution the game sets up (main+0x716170).
     std::string aspect_ratio = "16:9";
@@ -63,8 +71,9 @@ struct RuntimeConfig {
     int fxaa = 0;
     bool fsr = false;
     // shadow_quality: 0 = no shadows (the shadow map pass is not drawn, lookups say "lit"), 1 = 512, 2 = 1024,
-    // 3 = the game's 2048 (1024 with performance_mode).
-    int shadow_quality = 3;
+    // 3 = the game's 2048 (1024 with performance_mode). 1024 by default: at the game's 720p the difference is small
+    // and the shadow pass is one of the largest bandwidth users on a tile GPU.
+    int shadow_quality = 2;
     // skip_prepass (experimental, for Mali): the game's depth-only world pass is left out and the colour pass writes
     // the depth instead (vk_backend.cpp, PrepassStat).
     bool skip_prepass = false;
@@ -87,9 +96,9 @@ struct RuntimeConfig {
     bool compositor_scaling = true;
     // GPUs without BC textures (Mali; Adreno 6xx without BCeNabler): BC1 textures are re-encoded as ETC2 (same size
     // as BC1) instead of decoded to RGBA8 (4x larger), when the GPU has ETC2 (bc_etc2); BC3 too with bc3_etc2
-    // (4x smaller than RGBA8, but lossier: off by default).
+    // (4x smaller than RGBA8, slightly lossier: on by default for Mali, where texture bandwidth is the bottleneck).
     bool bc_etc2 = true;
-    bool bc3_etc2 = false;
+    bool bc3_etc2 = true;
     // bc_astc (experimental; encoder from pull request #47 by fernanfez00): on GPUs with ASTC (Mali) BC1 / BC3 textures
     // are re-encoded as ASTC and BC5 normal maps as ASTC luminance + alpha, instead of ETC2 / decoded RGBA8.
     // astc_block: 4, 6 or 8 (world textures; the HUD, text and small textures stay 4x4).
@@ -104,8 +113,9 @@ struct RuntimeConfig {
     // (diagnostics for drivers whose dynamic rendering misbehaves, e.g. Mali flicker reports).
     bool render_pass_objects = false;
     // mali_barriers = 1 (PR #13): narrow layout-transition barriers (destination = the stages that use the image) and
-    // render targets made readable when their pass ends, so a tile-based GPU (Mali) can overlap passes. Off by default.
-    bool mali_barriers = false;
+    // render targets made readable when their pass ends, so a tile-based GPU (Mali) can overlap passes. On by
+    // default: it is a pure synchronization change (same waits, fewer pass breaks) and this build targets Mali.
+    bool mali_barriers = true;
     // performance_mode = 1: the engine's own lower-quality options: low-quality effects, 1024x1024 shadow maps instead
     // of 2048x2048 (read at start-up). The menu also sets render_scale 0.75 when it is turned on.
     bool performance_mode = false;
@@ -133,7 +143,7 @@ struct RuntimeConfig {
     // data kept on the GPU across frames), 32-512 MB. Smaller uses less RAM but fills sooner (emptied and refilled: a
     // short stall). Performance mode sets 64.
     int geo_cache_mb = 192;
-    int max_anisotropy = 0;  // limit on the game's anisotropic texture filtering (0 = the game's own level)
+    int max_anisotropy = 4;  // cap on the game's anisotropic filtering (0 = the game's own level); 16x taps are costly on Mali
     // anisotropy (settings menu "Anisotropic filtering"): -1 = as the game asks, 0 = off, 2 / 4 / 8 / 16 = that level on
     // every mipmapped, linearly filtered texture (capped at the GPU's limit). Sharper textures at grazing angles
     // (floors, walls, roads) for some GPU time.

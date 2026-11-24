@@ -516,6 +516,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "record_thread")) cfg->record_thread = v != 0;
             else if (!strcmp(key, "fast_cores")) cfg->fast_cores = v != 0;
             else if (!strcmp(key, "gpu_compression")) cfg->gpu_compression = v != 0;
+            else if (!strcmp(key, "mali_afbc")) cfg->mali_afbc = v != 0;
+            else if (!strcmp(key, "image_format_list")) cfg->format_list = v < 0 ? -1 : (v != 0 ? 1 : 0);
             else if (!strcmp(key, "audio_smooth")) cfg->audio_smooth = v != 0;
             else if (!strcmp(key, "lrz_workaround")) cfg->lrz_workaround = v != 0;
             else if (!strcmp(key, "shader_depth_test")) cfg->shader_depth_test = v != 0;
@@ -683,6 +685,8 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
     if (!cfg->shader_depth_test) LOGI(kTag, "settings: shader_depth_test off");
     if (cfg->hole_test || cfg->lrz_workaround)
         LOGI(kTag, "settings: hole_test %d, lrz_workaround %d", cfg->hole_test, int(cfg->lrz_workaround));
+    if (!cfg->mali_afbc || cfg->format_list != -1)
+        LOGI(kTag, "settings: mali_afbc %d, image_format_list %d", int(cfg->mali_afbc), cfg->format_list);
     if (cfg->profile) dsr::profiler::Enable();
 }
 
