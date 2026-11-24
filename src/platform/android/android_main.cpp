@@ -372,6 +372,8 @@ std::atomic<bool> g_touch_visible{false};  // the on-screen controls show (set b
 std::atomic<uint64_t> g_pad_buttons{0};    // the controller's buttons (copy of g_pad.buttons, for other threads)
 std::atomic<uint64_t> g_touch_buttons{0};  // the on-screen buttons
 std::atomic<bool> g_menu_open{false};
+// Set by a swipe in from the left edge (no touch controls) or the Back key: MenuWatcher opens the menu.
+std::atomic<bool> g_menu_request{false};
 std::string g_custom_game_dir;  // settings.txt `game_dir`: a game folder the player picked
 
 #define TOUCH_HELP                                                                                            \
@@ -1173,6 +1175,13 @@ void MenuWatcher(android_app* app) {
     bool held = false, fired = false;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        if (g_menu_request.exchange(false) && !g_menu_open) {
+            env->CallStaticVoidMethod(g_menu_cls, show, app->activity->clazz);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+        }
         const bool now_held = ((g_pad_buttons.load() | g_touch_buttons.load()) & both) == both;
         if (!now_held) {
             held = fired = false;
@@ -1517,9 +1526,66 @@ uint64_t KeyToButton(int32_t key) {
     }
 }
 
+// A swipe in from the left edge opens the settings menu: the way back into it on a phone with the touch controls
+// turned off and no controller (TouchControls.java catches the same gesture while they are on). A finger that
+// comes down within 24 dp of the left edge and moves right by a sixth of the width, mostly sideways.
+struct EdgeSwipe {
+    int32_t pointer = -1;
+    float x0 = 0, y0 = 0;
+};
+EdgeSwipe g_edge;
+
+void TrackEdgeSwipe(android_app* app, AInputEvent* ev) {
+    const int32_t action = AMotionEvent_getAction(ev);
+    const int32_t masked = action & AMOTION_EVENT_ACTION_MASK;
+    const size_t index = size_t((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
+    const float density = app->config ? std::max(1.0f, AConfiguration_getDensity(app->config) / 160.0f) : 2.0f;
+    const float width = app->window ? float(ANativeWindow_getWidth(app->window)) : 0.0f;
+    if (masked == AMOTION_EVENT_ACTION_DOWN || masked == AMOTION_EVENT_ACTION_POINTER_DOWN) {
+        const float x = AMotionEvent_getX(ev, index);
+        if (g_edge.pointer < 0 && x <= 24.0f * density) {
+            g_edge.pointer = AMotionEvent_getPointerId(ev, index);
+            g_edge.x0 = x;
+            g_edge.y0 = AMotionEvent_getY(ev, index);
+        }
+        return;
+    }
+    if (g_edge.pointer < 0) return;
+    if (masked == AMOTION_EVENT_ACTION_MOVE) {
+        for (size_t i = 0; i < AMotionEvent_getPointerCount(ev); i++) {
+            if (AMotionEvent_getPointerId(ev, i) != g_edge.pointer) continue;
+            const float dx = AMotionEvent_getX(ev, i) - g_edge.x0, dy = std::fabs(AMotionEvent_getY(ev, i) - g_edge.y0);
+            if (dy > 0.5f * std::max(dx, 1.0f) && dy > 24.0f * density) {
+                g_edge.pointer = -1;  // mostly up or down: not the gesture
+            } else if (width > 0 && dx >= width / 6) {
+                g_edge.pointer = -1;
+                LOGI(kTag, "swipe from the left edge: opening the settings menu");
+                g_menu_request = true;
+            }
+        }
+        return;
+    }
+    if (masked == AMOTION_EVENT_ACTION_UP || masked == AMOTION_EVENT_ACTION_CANCEL ||
+        (masked == AMOTION_EVENT_ACTION_POINTER_UP && AMotionEvent_getPointerId(ev, index) == g_edge.pointer))
+        g_edge.pointer = -1;
+}
+
 int32_t OnInput(android_app* app, AInputEvent* ev) {
     using namespace dsr::input;
     const int32_t type = AInputEvent_getType(ev);
+    if (type == AINPUT_EVENT_TYPE_MOTION && (AInputEvent_getSource(ev) & AINPUT_SOURCE_TOUCHSCREEN) == AINPUT_SOURCE_TOUCHSCREEN) {
+        if (g_menu_cls) TrackEdgeSwipe(app, ev);
+        return 0;
+    }
+    // Back (button, or the system's back gesture, itself a swipe in from an edge on gesture navigation) opens the
+    // settings menu once the game runs, instead of closing the app.
+    if (type == AINPUT_EVENT_TYPE_KEY && AKeyEvent_getKeyCode(ev) == AKEYCODE_BACK && g_menu_cls) {
+        if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) {
+            LOGI(kTag, "Back: opening the settings menu");
+            g_menu_request = true;
+        }
+        return 1;
+    }
     if (type == AINPUT_EVENT_TYPE_KEY) {
         const int32_t src = AInputEvent_getSource(ev);
         if (g_touch_visible && KeyToButton(AKeyEvent_getKeyCode(ev)) &&

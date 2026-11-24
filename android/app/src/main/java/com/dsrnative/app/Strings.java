@@ -972,6 +972,33 @@ final class Strings {
                 "Язык игры изменится при следующем запуске.", "ゲームの言語は次回起動時に切り替わります。",
                 "게임 언어는 다음에 게임을 시작할 때 바뀝니다.", "游戏语言将在下次启动游戏时切换。", "遊戲語言將在下次啟動遊戲時切換。");
 
+        put("tip_swipe", "Or swipe in from the left edge of the screen (or press Back).",
+                "Ou balayez depuis le bord gauche de l'écran (ou appuyez sur Retour).",
+                "Oder vom linken Bildschirmrand nach rechts wischen (oder Zurück drücken).",
+                "Oppure scorri dal bordo sinistro dello schermo (o premi Indietro).",
+                "O desliza desde el borde izquierdo de la pantalla (o pulsa Atrás).",
+                "Ou deslize a partir da borda esquerda da tela (ou toque em Voltar).",
+                "Или проведите от левого края экрана (или нажмите «Назад»).",
+                "または画面の左端から右へスワイプ（または「戻る」）。",
+                "또는 화면 왼쪽 가장자리에서 오른쪽으로 밀기(또는 뒤로 가기).",
+                "或从屏幕左边缘向右滑动（或按返回）。", "或從螢幕左邊緣向右滑動（或按返回）。");
+        put("skin_t", "Skin", "Apparence", "Aussehen", "Aspetto", "Aspecto", "Aparência", "Оформление", "スキン",
+                "스킨", "外观", "外觀");
+        put("skin_n", "The Dark Souls skin is by v39192503-ux. Your own: a folder of PNG images in Download/DSRNative/skins (see README.txt there); it shows up here.",
+                "L'apparence Dark Souls est de v39192503-ux. La vôtre : un dossier d'images PNG dans Download/DSRNative/skins (voir README.txt) ; il apparaît ici.",
+                "Das Dark-Souls-Aussehen stammt von v39192503-ux. Eigenes: ein Ordner mit PNG-Bildern in Download/DSRNative/skins (siehe README.txt dort); er erscheint hier.",
+                "L'aspetto Dark Souls è di v39192503-ux. Il tuo: una cartella di immagini PNG in Download/DSRNative/skins (vedi README.txt); comparirà qui.",
+                "El aspecto Dark Souls es de v39192503-ux. El tuyo: una carpeta de imágenes PNG en Download/DSRNative/skins (consulta README.txt); aparecerá aquí.",
+                "A aparência Dark Souls é de v39192503-ux. A sua: uma pasta de imagens PNG em Download/DSRNative/skins (veja README.txt); ela aparece aqui.",
+                "Оформление Dark Souls — автор v39192503-ux. Своё: папка с PNG-изображениями в Download/DSRNative/skins (см. README.txt там); оно появится здесь.",
+                "Dark Souls スキンの作者は v39192503-ux です。自作スキン：Download/DSRNative/skins に PNG 画像のフォルダーを置くと（README.txt 参照）ここに表示されます。",
+                "Dark Souls 스킨 제작: v39192503-ux. 나만의 스킨: Download/DSRNative/skins에 PNG 이미지 폴더를 넣으면(README.txt 참고) 여기에 표시됩니다.",
+                "Dark Souls 外观作者：v39192503-ux。自制外观：在 Download/DSRNative/skins 放一个 PNG 图片文件夹（见其中的 README.txt），即会显示在这里。",
+                "Dark Souls 外觀作者：v39192503-ux。自製外觀：在 Download/DSRNative/skins 放一個 PNG 圖片資料夾（見其中的 README.txt），即會顯示在這裡。");
+        put("skin_ds", "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls",
+                "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls");
+        put("skin_classic", "Classic", "Classique", "Klassisch", "Classico", "Clásico", "Clássico", "Классическое",
+                "クラシック", "클래식", "经典", "經典");
         // ---- First launch
         put("tip_t", "Settings menu", "Menu des paramètres", "Einstellungsmenü", "Menu impostazioni", "Menú de ajustes",
                 "Menu de configurações", "Меню настроек", "設定メニュー", "설정 메뉴", "设置菜单", "設定選單");

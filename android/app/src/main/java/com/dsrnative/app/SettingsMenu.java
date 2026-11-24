@@ -96,6 +96,8 @@ public final class SettingsMenu {
         Strings.setLanguage(v.containsKey("language") ? v.get("language") : "en-US");
         TouchControls.sRecenter = !"0".equals(v.get("touch_camera_recenter"));
         TouchControls.setLayout(v.get("touch_layout"));
+        TouchControls.prepareSkinsDir(settingsPath);
+        TouchControls.setSkin(activity, v.get("touch_skin"), settingsPath);
         if ("1".equals(v.get("fps_counter"))) FpsCounter.apply(activity, true);
         if (!"0".equals(v.get("keep_alive"))) KeepAliveService.apply(activity, true);  // on unless turned off
         showFirstLaunchTip(activity);
@@ -110,7 +112,7 @@ public final class SettingsMenu {
             try {
                 AlertDialog d = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                         .setTitle(Strings.t("tip_t"))
-                        .setMessage(Strings.t("tip"))
+                        .setMessage(Strings.t("tip") + " " + Strings.t("tip_swipe"))
                         .setPositiveButton(Strings.t("ok"), null)
                         .create();
                 d.setOnDismissListener(x -> {
@@ -735,7 +737,17 @@ public final class SettingsMenu {
 
     private void buildTouchTab() {
         section(Strings.t("sec_touch"));
-        toggle("touch_controls", Strings.t("touch_t"), Strings.t("changes_now"), "1", "0", "1");
+        toggle("touch_controls", Strings.t("touch_t"), Strings.t("changes_now") + " " + Strings.t("tip_swipe"), "1",
+                "0", "1");
+        List<String> folders = TouchControls.folderSkins(sSettingsPath);
+        String[] skinValues = new String[2 + folders.size()], skinLabels = new String[2 + folders.size()];
+        skinValues[0] = TouchControls.SKIN_DEFAULT;
+        skinLabels[0] = Strings.t("skin_ds");
+        skinValues[1] = TouchControls.SKIN_CLASSIC;
+        skinLabels[1] = Strings.t("skin_classic");
+        for (int i = 0; i < folders.size(); i++) skinValues[2 + i] = skinLabels[2 + i] = folders.get(i);
+        choice("touch_skin", Strings.t("skin_t"), Strings.t("skin_n"), skinValues, skinLabels,
+                TouchControls.SKIN_DEFAULT);
         choice("touch_opacity", Strings.t("opacity_t"), null, new String[] {"0.3", "0.5", "0.7", "1.0"},
                 new String[] {"30%", "50%", "70%", "100%"}, "0.7");
         choice("touch_camera_speed", Strings.t("camspeed_t"), null, new String[] {"0.75", "1.0", "1.5", "2.0"},
@@ -1382,6 +1394,9 @@ public final class SettingsMenu {
             boolean on = "1".equals(value);
             KeepAliveService.apply(mA, on);
             if (on) KeepAliveService.askNotificationPermission(mA);
+            now = true;
+        } else if (key.equals("touch_skin")) {
+            TouchControls.setSkin(mA, value, sSettingsPath);
             now = true;
         } else if (key.equals("touch_camera_recenter")) {
             TouchControls.sRecenter = !"0".equals(value);

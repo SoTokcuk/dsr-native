@@ -1,0 +1,2 @@
+"Dark Souls" touch control skin by v39192503-ux (https://github.com/v39192503-ux), contributed in
+https://github.com/kvse/dsr-native/issues/33 and included with the author's permission.
