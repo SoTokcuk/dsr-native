@@ -508,7 +508,8 @@ public final class SettingsMenu {
         toggle("sharp_hud", Strings.t("sharp_t"), Strings.t("sharp_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         choice("fxaa", Strings.t("fxaa_t"), Strings.t("fxaa_n") + " " + Strings.t("changes_next"), new String[] {"0", "1", "2"},
                 new String[] {Strings.t("off"), Strings.t("fxaa_fast"), Strings.t("fxaa_quality")}, "0");
-        toggle("fsr", Strings.t("fsr_t"), Strings.t("fsr_n") + " " + Strings.t("changes_next"), "1", "0", "0");
+        choice("fsr", Strings.t("fsr_t"), Strings.t("fsr_n") + " " + Strings.t("temporal_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "1", "2"}, new String[] {Strings.t("off"), "FSR 1", Strings.t("fsr_temporal")}, "0");
         choice("shadow_quality", Strings.t("shq_t"), Strings.t("shq_n") + " " + Strings.t("changes_next"),
                 new String[] {"0", "1", "2", "3"},
                 new String[] {Strings.t("shq_off"), Strings.t("shq_low"), Strings.t("shq_med"), Strings.t("shq_high")}, "3");
