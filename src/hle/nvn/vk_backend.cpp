@@ -1628,6 +1628,13 @@ private:
         mali_barriers_ = dsr::GetRuntime().config.mali_barriers;
         if (mali_barriers_)
             LOGI(kTag, "settings mali_barriers = 1: narrow layout barriers, render targets readable when their pass ends");
+        // mali_tile_turbo (experimental, Mali only; from PR #73 by Dann-os3d): see LayoutScope.
+        const bool is_mali = props_.vendorID == 0x13B5 || strstr(props_.deviceName, "Mali") != nullptr;
+        tile_turbo_ = dsr::GetRuntime().config.mali_tile_turbo && is_mali;
+        if (tile_turbo_)
+            LOGI(kTag, "settings mali_tile_turbo = 1: layout-scoped barriers (unknown layouts keep the full barrier)");
+        else if (dsr::GetRuntime().config.mali_tile_turbo)
+            LOGI(kTag, "settings mali_tile_turbo = 1 ignored: not a Mali GPU");
         if (!begin_rendering_ || !end_rendering_) {
             // Older drivers (Vulkan 1.1, e.g. Adreno 6xx on Android 10/11): render pass and framebuffer objects.
             begin_rendering_ = nullptr;
@@ -3582,21 +3589,79 @@ private:
     }
     bool mali_barriers_ = false;  // settings mali_barriers
     uint64_t vertex_read_barriers_ = 0;
+
+    // ---- mali_tile_turbo (experimental, Mali only; from PR #73 by Dann-os3d) --------------------------------------
+    // A layout transition normally waits for all earlier work (ALL_COMMANDS, any memory write) and blocks all later
+    // work. When both layouts say exactly how the image is used (attachment, copy, sampled), the barrier is scoped to
+    // those stages and accesses instead, so a tile-based GPU can keep unrelated work going across it. GENERAL and
+    // other layouts keep the full barrier. The pass-to-pass attachment barrier is likewise narrowed to the kinds of
+    // attachment (colour, depth) that have an unsynchronised write.
+    bool tile_turbo_ = false;
+    uint64_t turbo_scoped_ = 0, turbo_full_ = 0;
+    static bool LayoutScope(VkImageLayout layout, bool source, VkPipelineStageFlags* stages, VkAccessFlags* access) {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_UNDEFINED:  // contents discarded: nothing to wait for (only valid as the source)
+                if (!source) return false;
+                *stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                *access = 0;
+                return true;
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                *stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                *access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                return true;
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+                *stages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                *access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                return true;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                *stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                *access = VK_ACCESS_TRANSFER_READ_BIT;
+                return true;
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                *stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                *access = VK_ACCESS_TRANSFER_WRITE_BIT;
+                return true;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:  // sampled by vertex / fragment shaders (no compute here)
+                *stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                *access = VK_ACCESS_SHADER_READ_BIT;
+                return true;
+            default:
+                return false;
+        }
+    }
+
     void RawBarrier(VkImage image, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
                     uint32_t levels = 1, uint32_t layers = 1) {
         barriers_++;
-        const VkPipelineStageFlags dst_stages = mali_barriers_ ? StagesUsing(to) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkPipelineStageFlags src_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkPipelineStageFlags dst_stages = mali_barriers_ ? StagesUsing(to) : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkAccessFlags src_access = VK_ACCESS_MEMORY_WRITE_BIT;
+        VkAccessFlags dst_access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        if (tile_turbo_) {
+            VkPipelineStageFlags ss = 0, ds = 0;
+            VkAccessFlags sa = 0, da = 0;
+            if (LayoutScope(from, true, &ss, &sa) && LayoutScope(to, false, &ds, &da)) {
+                src_stages = ss;
+                dst_stages = ds;
+                src_access = sa;
+                dst_access = da;
+                turbo_scoped_++;
+            } else {
+                dst_stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+                turbo_full_++;
+            }
+        }
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-        b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        b.srcAccessMask = src_access;
+        b.dstAccessMask = dst_access;
         b.oldLayout = from;
         b.newLayout = to;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = image;
         b.subresourceRange = {aspect, 0, levels, 0, layers};
-        Rec([b, dst_stages](VkCommandBuffer cb) {
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dst_stages, 0, 0, nullptr, 0, nullptr, 1, &b);
+        Rec([b, src_stages, dst_stages](VkCommandBuffer cb) {
+            vkCmdPipelineBarrier(cb, src_stages, dst_stages, 0, 0, nullptr, 0, nullptr, 1, &b);
         });
     }
     void Transition(Image& img, VkImageLayout to) {
@@ -4159,22 +4224,38 @@ private:
         // there is lost: rectangular, bin-sized holes (and LRZ-block squares) in smoke, dust and glow that
         // flicker with timing. One memory barrier covers every attachment of the pass.
         {
-            bool hazard = false;
+            bool color_hazard = false, depth_hazard = false;
             for (Image* c : colors)
-                if (c && c->attach_unsynced && c->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) hazard = true;
+                if (c && c->attach_unsynced && c->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) color_hazard = true;
             if (depth && depth->attach_unsynced && depth->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                hazard = true;
-            if (hazard) {
+                depth_hazard = true;
+            if (color_hazard || depth_hazard) {
                 pass_barriers_++;
-                Rec([](VkCommandBuffer cb) {
+                VkAccessFlags src = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                VkAccessFlags dst = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                          VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                if (tile_turbo_) {  // only the attachment kinds with a pending write
+                    src = dst = 0;
+                    st = 0;
+                    if (color_hazard) {
+                        src |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                        dst |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                        st |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                    }
+                    if (depth_hazard) {
+                        src |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                        dst |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                        st |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    }
+                }
+                Rec([src, dst, st](VkCommandBuffer cb) {
                     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-                    mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                    mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-                    const VkPipelineStageFlags st = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                                                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
-                                                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    mb.srcAccessMask = src;
+                    mb.dstAccessMask = dst;
                     vkCmdPipelineBarrier(cb, st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
                 });
             }
@@ -6529,6 +6610,10 @@ private:
         }
         LOGI(kTag, "last 10 s: %llu render passes started, %llu image barriers (%llu for vertex-shader reads of render targets)",
              (unsigned long long)render_passes_, (unsigned long long)barriers_, (unsigned long long)vertex_read_barriers_);
+        if (tile_turbo_)
+            LOGI(kTag, "mali_tile_turbo: %llu barriers scoped by layout, %llu kept full (other layouts)",
+                 (unsigned long long)turbo_scoped_, (unsigned long long)turbo_full_);
+        turbo_scoped_ = turbo_full_ = 0;
         vertex_read_barriers_ = 0;
         render_passes_ = barriers_ = 0;
         if (!pass_breaks_.empty()) {
@@ -6733,6 +6818,9 @@ private:
         key.push_back(0xffffffffu);
         key.push_back(uint32_t(depth));
         key.push_back(uint32_t(depth_load));
+        // The stencil hint decides the depth attachment's stencil load/store: two passes differing only in it need
+        // two render passes (it was missing from the key; fix from PR #73 by Dann-os3d).
+        key.push_back(uint32_t(stencil_hint));
         std::lock_guard<std::mutex> lk(rp_mutex_);
         auto it = render_passes_cache_.find(key);
         if (it != render_passes_cache_.end()) return it->second;

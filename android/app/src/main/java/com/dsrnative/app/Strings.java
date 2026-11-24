@@ -302,6 +302,21 @@ final class Strings {
                 "Mali 같은 GPU가 렌더링 패스를 겹쳐 실행합니다. 효과가 깜박이거나 사라지면 끄세요.",
                 "让 Mali 等 GPU 重叠执行渲染通道。如果特效闪烁或消失，请关闭。",
                 "讓 Mali 等 GPU 重疊執行繪製通道。如果特效閃爍或消失，請關閉。");
+        put("turbo_t", "Mali Tile Turbo (experimental)", "Mali Tile Turbo (expérimental)",
+                "Mali Tile Turbo (experimentell)", "Mali Tile Turbo (sperimentale)", "Mali Tile Turbo (experimental)",
+                "Mali Tile Turbo (experimental)", "Mali Tile Turbo (эксперимент)", "Mali Tile Turbo（実験的）",
+                "Mali Tile Turbo (실험적)", "Mali Tile Turbo（实验性）", "Mali Tile Turbo（實驗性）");
+        put("turbo_n", "Mali GPUs only: lighter GPU synchronisation between rendering steps, which may raise the frame rate. Turn off if anything flickers, goes black or goes missing.",
+                "GPU Mali uniquement : synchronisation GPU allégée entre les étapes de rendu, ce qui peut augmenter les images par seconde. Désactivez si quelque chose clignote, devient noir ou disparaît.",
+                "Nur Mali-GPUs: leichtere GPU-Synchronisierung zwischen den Renderschritten, kann die Bildrate erhöhen. Ausschalten, wenn etwas flackert, schwarz wird oder fehlt.",
+                "Solo GPU Mali: sincronizzazione GPU più leggera tra le fasi di rendering, può aumentare i fotogrammi al secondo. Disattiva se qualcosa sfarfalla, diventa nero o scompare.",
+                "Solo GPU Mali: sincronización de GPU más ligera entre los pasos de renderizado, puede aumentar los fotogramas por segundo. Desactívalo si algo parpadea, se vuelve negro o desaparece.",
+                "Somente GPUs Mali: sincronização de GPU mais leve entre as etapas de renderização, pode aumentar os quadros por segundo. Desligue se algo piscar, ficar preto ou sumir.",
+                "Только GPU Mali: облегчённая синхронизация GPU между этапами отрисовки, может повысить частоту кадров. Выключите, если что-то мерцает, чернеет или пропадает.",
+                "Mali GPU のみ：描画ステップ間の GPU 同期を軽くし、フレームレートが上がる場合があります。ちらつき・黒くなる・消える場合はオフにしてください。",
+                "Mali GPU 전용: 렌더링 단계 사이의 GPU 동기화를 가볍게 하여 프레임 속도가 오를 수 있습니다. 깜박이거나 검게 되거나 사라지면 끄세요.",
+                "仅限 Mali GPU：减轻渲染步骤之间的 GPU 同步，可能提高帧率。如果画面闪烁、变黑或消失，请关闭。",
+                "僅限 Mali GPU：減輕繪製步驟之間的 GPU 同步，可能提高影格率。如果畫面閃爍、變黑或消失，請關閉。");
         put("aspect_t", "Aspect ratio (experimental)", "Format d'image (expérimental)",
                 "Seitenverhältnis (experimentell)", "Proporzioni (sperimentale)", "Relación de aspecto (experimental)",
                 "Proporção de tela (experimental)", "Соотношение сторон (экспериментально)", "アスペクト比（試験的）",

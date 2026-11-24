@@ -35,6 +35,9 @@ struct RuntimeConfig {
     // shader dump, auto_capture, and every file kept; off = only the run log (Info level), and only the 10 newest
     // starts' log files kept in Download/DSRNative/logs.
     bool detailed_logs = false;
+    // mali_tile_turbo (experimental, Mali GPUs only): image layout transitions scoped to the stages and accesses their
+    // layouts name, instead of waiting for / blocking all GPU work (vk_backend.cpp, LayoutScope).
+    bool mali_tile_turbo = false;
     bool profile = true;          // diagnostics: sampling CPU profile of the busy threads, logged every 10 s
     float gamma = 1.0f;           // extra display gamma applied through the game's brightness ramp (> 1 lifts shadows)
     std::string present_mode = "fifo";  // swapchain present mode: fifo (vsync, default), mailbox, fifo_relaxed, immediate (FIFO if unsupported)

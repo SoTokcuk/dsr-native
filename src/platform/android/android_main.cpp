@@ -578,6 +578,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
                 have_present_mode = true;
             } else if (!strcmp(key, "settings_version")) settings_version = v;
             else if (!strcmp(key, "mali_barriers")) cfg->mali_barriers = v != 0;
+            else if (!strcmp(key, "mali_tile_turbo")) cfg->mali_tile_turbo = v != 0;
             else if (!strcmp(key, "performance_mode")) cfg->performance_mode = v != 0;
             else if (!strcmp(key, "texture_mip_skip")) cfg->texture_mip_skip = std::clamp(v, 0, 1);
             else if (!strcmp(key, "pass_load_skip")) cfg->pass_load_skip = v != 0;
@@ -660,9 +661,9 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
          path.c_str(), cfg->target_fps, cfg->dynamic_fps ? " (auto)" : cfg->unlocked_fps ? " (unlocked)" : "", cfg->async_pipelines ? "on" : "off", cfg->auto_capture ? "on" : "off",
          cfg->profile ? "on" : "off", cfg->gamma, cfg->exposure, cfg->present_mode.c_str(),
          g_face_by_position ? "position" : "label");
-    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, mali_barriers %d, performance_mode %d, texture_mip_skip %d, lighter_post_fx %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
+    LOGI(kTag, "settings: gpu_driver %s, bc_enabler %d, language %s, render scale %.2f, shadow_compare %d, game_hooks %d, skip_intro %d, render_pass_objects %d, mali_barriers %d, mali_tile_turbo %d, performance_mode %d, texture_mip_skip %d, lighter_post_fx %d, present_mode %s, hole_test %d", cfg->gpu_driver.c_str(),
          int(cfg->bc_enabler), cfg->language.c_str(), cfg->render_scale, cfg->shadow_compare,
-         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), int(cfg->performance_mode), cfg->texture_mip_skip, int(cfg->lighter_post_fx), cfg->present_mode.c_str(),
+         int(cfg->game_hooks), int(cfg->skip_intro), int(cfg->render_pass_objects), int(cfg->mali_barriers), int(cfg->mali_tile_turbo), int(cfg->performance_mode), cfg->texture_mip_skip, int(cfg->lighter_post_fx), cfg->present_mode.c_str(),
          cfg->hole_test);
     if (!g_custom_game_dir.empty()) LOGI(kTag, "settings: game_dir %s", g_custom_game_dir.c_str());
     LOGI(kTag, "settings: touch controls %s, opacity %.2f, camera speed %.2f%s", g_touch.enabled ? "on" : "off",

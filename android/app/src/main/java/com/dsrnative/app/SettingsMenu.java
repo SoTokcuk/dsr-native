@@ -461,6 +461,8 @@ public final class SettingsMenu {
                 "0");
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
+        toggle("mali_tile_turbo", Strings.t("turbo_t"), Strings.t("turbo_n") + " " + Strings.t("changes_next"), "1",
+                "0", "0");
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
