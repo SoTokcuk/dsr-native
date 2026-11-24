@@ -245,6 +245,8 @@ final class Strings {
                 "更輕的特效、更低解析度的陰影和 75% 的繪製比例（下方滑桿仍可調整）。");
         put("sec_gpu", "GPU options", "Options GPU", "GPU-Optionen", "Opzioni GPU", "Opciones de GPU", "Opções de GPU",
                 "Параметры GPU", "GPU オプション", "GPU 옵션", "GPU 选项", "GPU 選項");
+        put("sec_mali", "Mali fixes", "Correctifs Mali", "Mali-Korrekturen", "Correzioni Mali", "Ajustes para Mali",
+                "Ajustes para Mali", "Исправления для Mali", "Mali 向け修正", "Mali 수정", "Mali 修复", "Mali 修正");
         put("gpu_n", "For GPUs such as Mali that lack the game's texture formats or draw in tiles. Off unless you are testing.",
                 "Pour les GPU comme Mali, sans les formats de texture du jeu ou qui dessinent par tuiles. Désactivé sauf pour des tests.",
                 "Für GPUs wie Mali, denen die Texturformate des Spiels fehlen oder die in Kacheln zeichnen. Aus, außer zum Testen.",

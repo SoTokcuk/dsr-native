@@ -519,6 +519,12 @@ public final class SettingsMenu {
                 "0");
 
         section(Strings.t("sec_gpu"));
+        choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_next"),
+                new String[] {"0", "1", "2"},
+                new String[] {Strings.t("off"), Strings.t("hidden_gentle"), Strings.t("hidden_aggr")}, "0");
+        // Mali fixes: settings for GPUs such as Mali (no BC textures, tile-based), folded away by default.
+        final int maliFirst = mBody.getChildCount() + 1;  // after the group's header row
+        TextView maliHeader = subsection(Strings.t("sec_mali"));
         note(Strings.t("gpu_n"));
         toggle("bc3_etc2", Strings.t("bc3_t"), Strings.t("bc3_n") + " " + Strings.t("changes_next"), "1", "0", "0");
         toggle("bc_astc", Strings.t("astc_t"), Strings.t("astc_n") + " " + Strings.t("changes_next"), "1", "0", "0");
@@ -529,11 +535,9 @@ public final class SettingsMenu {
         toggle("mali_barriers", Strings.t("malib_t"), Strings.t("malib_n") + " " + Strings.t("changes_next"), "1", "0",
                 "0");
         toggle("skip_prepass", Strings.t("prepass_t"), Strings.t("prepass_n") + " " + Strings.t("changes_next"), "1", "0", "0");
-        choice("skip_hidden", Strings.t("hidden_t"), Strings.t("hidden_n") + " " + Strings.t("changes_next"),
-                new String[] {"0", "1", "2"},
-                new String[] {Strings.t("off"), Strings.t("hidden_gentle"), Strings.t("hidden_aggr")}, "0");
         toggle("mali_tile_turbo", Strings.t("turbo_t"), Strings.t("turbo_n") + " " + Strings.t("changes_next"), "1",
                 "0", "0");
+        foldable(maliHeader, Strings.t("sec_mali"), maliFirst, mBody.getChildCount());
     }
 
     // ---- Driver tab ---------------------------------------------------------------------------------------------
@@ -1495,6 +1499,41 @@ public final class SettingsMenu {
         t.setLetterSpacing(0.08f);
         t.setPadding(0, dp(mBody.getChildCount() == 0 ? 2 : 18), 0, dp(2));
         mBody.addView(t);
+    }
+
+    // A sub-heading row that folds the settings below it away (tap or A to open / close).
+    private static boolean sMaliOpen = false;  // remembered while the app runs
+
+    private TextView subsection(String title) {
+        TextView t = text("", 14, GOLD, true);
+        t.setPadding(dp(14), dp(12), dp(14), dp(12));
+        t.setFocusable(true);
+        t.setClickable(true);
+        StateListDrawable bg = new StateListDrawable();
+        bg.addState(new int[] {android.R.attr.state_focused}, rounded(0xFF3A3A3A, 10, 0xFFFFFFFF));
+        bg.addState(new int[] {android.R.attr.state_pressed}, rounded(0xFF3A3A3A, 10, 0));
+        bg.addState(new int[] {}, rounded(CARD, 10, 0));
+        t.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(12);
+        mBody.addView(t, lp);
+        return t;
+    }
+
+    // Views [first, end) of mBody are shown or hidden by `header`.
+    private void foldable(final TextView header, final String title, int first, int end) {
+        final List<View> kids = new ArrayList<>();
+        for (int i = first; i < end && i < mBody.getChildCount(); i++) kids.add(mBody.getChildAt(i));
+        final Runnable paint = () -> {
+            header.setText((sMaliOpen ? "\u25BE  " : "\u25B8  ") + title);
+            for (View k : kids) k.setVisibility(sMaliOpen ? View.VISIBLE : View.GONE);
+        };
+        paint.run();
+        header.setOnClickListener(v -> {
+            sMaliOpen = !sMaliOpen;
+            paint.run();
+        });
     }
 
     private void note(String s) {
