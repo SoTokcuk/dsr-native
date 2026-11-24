@@ -587,7 +587,7 @@ void LoadSettings(const std::string& path, dsr::RuntimeConfig* cfg) {
             else if (!strcmp(key, "mali_tile_turbo")) cfg->mali_tile_turbo = v != 0;
             else if (!strcmp(key, "sharp_hud")) cfg->sharp_hud = v != 0;
             else if (!strcmp(key, "fxaa")) cfg->fxaa = std::clamp(v, 0, 2);
-            else if (!strcmp(key, "fsr")) cfg->fsr = std::clamp(v, 0, 2);
+            else if (!strcmp(key, "fsr")) cfg->fsr = v != 0;
             else if (!strcmp(key, "shadow_quality")) cfg->shadow_quality = std::clamp(v, 0, 3);
             else if (!strcmp(key, "skip_prepass")) cfg->skip_prepass = v != 0;
             else if (!strcmp(key, "skip_hidden")) cfg->skip_hidden = std::clamp(v, 0, 2);

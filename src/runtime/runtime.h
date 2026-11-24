@@ -61,7 +61,7 @@ struct RuntimeConfig {
     // fxaa 0 = off, 1 = FXAA 3.11 fast (for Mali), 2 = quality; fsr = FSR 1 upscaling (EASU + RCAS sharpening) instead
     // of the bilinear enlargement.
     int fxaa = 0;
-    int fsr = 0;  // 0 off, 1 FSR 1, 2 FSR 1 + temporal smoothing (experimental: frames blended, no motion vectors)
+    bool fsr = false;
     // shadow_quality: 0 = no shadows (the shadow map pass is not drawn, lookups say "lit"), 1 = 512, 2 = 1024,
     // 3 = the game's 2048 (1024 with performance_mode).
     int shadow_quality = 3;
