@@ -1363,13 +1363,13 @@ public:
         if (src && !(src->written && !IsDepthFormat(src->nvn_format))) src = nullptr;
         // sharp_hud: the frame shown is the sharp image (the HUD drawn into it, or at least the frame enlarged into
         // it), every frame, so the swapchain keeps one size.
+        Image* sharp = nullptr;
         if (src) {
             src->presented = true;
-            if (sharp_w_ && src->width == sharp_rw_ && src->height == sharp_rh_)
-                if (Image* sh = SharpStart(*src)) src = sh;
+            if (sharp_w_ && src->width == sharp_rw_ && src->height == sharp_rh_) sharp = SharpImage(*src);
         }
-        sharp_ = {};
-        if (src && InOpenPass(src)) EndRendering();
+        Image* const game_frame = src;
+        if (sharp) src = sharp;  // its size decides the swapchain's
         // The swapchain is sized for the game's frame (see EnsureSwapchain): a frame of another size remakes it.
         if (src && dsr::GetRuntime().config.compositor_scaling && (src->width != frame_w_ || src->height != frame_h_)) {
             frame_w_ = src->width;
@@ -1379,6 +1379,11 @@ public:
         if (!EnsureSwapchain()) return;
         // Acquire, copy and present run on the recorder after this frame's commands; the render thread goes on.
         BeginCommands();
+        // sharp_hud: a frame whose HUD did not go into its sharp image (none drawn, or dropped) is enlarged into it
+        // now (recorded here: the command buffer above is where this frame's presentation goes).
+        if (sharp && !(sharp_.active && sharp_.src == game_frame && sharp_.serial == game_frame->serial && sharp_.img == sharp))
+            SharpEnlarge(*game_frame, *sharp);
+        sharp_ = {};
         PresentJob pj;
         if (src) {
             Transition(*src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1633,7 +1638,9 @@ private:
         if (const dsr::RuntimeConfig& rc = dsr::GetRuntime().config; rc.sharp_hud) {
             const int rw = rc.render_width, rh = rc.render_height;
             const int target_h = std::min(rc.screen_height > 0 ? rc.screen_height : 1080, 1080);
-            if (rw > 0 && rh > 0 && target_h > rh) {
+            if (rc.render_scale >= 0.999f) {
+                LOGI(kTag, "sharp_hud: off at a 100%% render resolution (only used below it)");
+            } else if (rw > 0 && rh > 0 && target_h > rh) {
                 sharp_rw_ = rw;
                 sharp_rh_ = rh;
                 sharp_h_ = target_h;
@@ -5220,6 +5227,16 @@ private:
         // (below). A draw that needs the frame's depth / stencil buffer cannot (it has the render size): the frame
         // is then shown as the game drew it (sharp HUD dropped for that frame).
         Image* sharp_src = nullptr;
+        if (sharp_w_ && sharp_diag_ < 16 && !colors.empty() && colors[0] && !colors[0]->presented &&
+            colors[0]->width == sharp_rw_ && colors[0]->height == sharp_rh_ && (st_.color.blend_enable & 1)) {
+            float sx = 0, sy = 0;
+            if (Projection2D(&sx, &sy) && std::fabs(sx - 2.0f / 1280.0f) < 1e-6f && std::fabs(sy + 2.0f / 720.0f) < 1e-6f &&
+                sharp_diag_keys_.insert("unshown " + std::to_string(colors[0]->serial)).second) {
+                sharp_diag_++;
+                LOGI(kTag, "sharp_hud: HUD-like draw into image %llu (%dx%d format %d), which has not been shown",
+                     (unsigned long long)colors[0]->serial, colors[0]->width, colors[0]->height, colors[0]->nvn_format);
+            }
+        }
         if (sharp_w_ && !colors.empty() && colors[0] && colors[0]->presented && colors[0]->width == sharp_rw_ &&
             colors[0]->height == sharp_rh_) {
             bool only = true;
@@ -5229,6 +5246,22 @@ private:
             if (!hud && only && (st_.color.blend_enable & 1)) {
                 float sx, sy;
                 hud = Projection2D(&sx, &sy) && std::fabs(sx - 2.0f / 1280.0f) < 1e-6f && std::fabs(sy + 2.0f / 720.0f) < 1e-6f;
+            }
+            if (sharp_diag_ < 16 && !(sharp_.active && sharp_.src == colors[0])) {
+                float sx = 0, sy = 0;
+                const bool proj = Projection2D(&sx, &sy);
+                if (proj && std::fabs(sx - 2.0f / 1280.0f) < 1e-6f && std::fabs(sy + 2.0f / 720.0f) < 1e-6f) {
+                    char why[200];
+                    snprintf(why, sizeof(why), "blend %d, %zu targets (only %d), depth %s test %d write %d func %d stencil %d",
+                             int(st_.color.blend_enable & 1), colors.size(), int(only), depth ? "bound" : "none",
+                             int(st_.depth.depth_test), int(st_.depth.depth_write), int(st_.depth.depth_func),
+                             int(st_.depth.stencil_test));
+                    if (sharp_diag_keys_.insert(why).second) {
+                        sharp_diag_++;
+                        LOGI(kTag, "sharp_hud: 2D draw into the shown frame (image %llu): %s -> %s",
+                             (unsigned long long)colors[0]->serial, why, hud ? "HUD" : "not a HUD start");
+                    }
+                }
             }
             if (hud && (!only || (depth && (st_.depth.depth_test || st_.depth.depth_write || st_.depth.stencil_test)))) {
                 if (active) {
@@ -7137,6 +7170,8 @@ private:
     } sharp_;
     std::unordered_map<uint64_t, Image> sharp_imgs_;  // by the game frame image's serial
     uint64_t sharp_draws_ = 0, sharp_dropped_ = 0, sharp_restarts_ = 0;
+    int sharp_diag_ = 0;  // diagnostics: kinds of 2D draws into the shown frame logged so far
+    std::set<std::string> sharp_diag_keys_;
     Image* SharpImage(const Image& src) {
         auto it = sharp_imgs_.find(src.serial);
         if (it != sharp_imgs_.end() && it->second.image && it->second.vk_format == src.vk_format) return &it->second;
@@ -7174,8 +7209,8 @@ private:
         }
         img.serial = ++image_serial_;
         img.written = true;
-        LOGI(kTag, "sharp_hud: sharp image %dx%d for the game's %dx%d frame (format %d)", img.width, img.height, src.width,
-             src.height, src.nvn_format);
+        LOGI(kTag, "sharp_hud: sharp image %dx%d for the game's %dx%d frame (image %llu, format %d)", img.width, img.height,
+             src.width, src.height, (unsigned long long)src.serial, src.nvn_format);
         return &(sharp_imgs_[src.serial] = img);
     }
     // The sharp image for frame image src, holding the frame as drawn so far (enlarged into it when this frame's
@@ -7185,6 +7220,13 @@ private:
         Image* sh = SharpImage(src);
         if (!sh) return nullptr;
         if (InOpenPass(&src) || InOpenPass(sh)) EndRendering();
+        SharpEnlarge(src, *sh);
+        if (sharp_.src == &src && sharp_.serial == src.serial) sharp_restarts_++;  // the frame changed after its HUD began
+        sharp_ = {true, &src, src.serial, sh};
+        return sh;
+    }
+    void SharpEnlarge(Image& src, Image& dst) {
+        Image* sh = &dst;
         Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         Transition(*sh, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkImageBlit b{};
@@ -7197,9 +7239,6 @@ private:
                            VK_FILTER_LINEAR);
         });
         barriers_ += 2;
-        if (sharp_.src == &src && sharp_.serial == src.serial) sharp_restarts_++;  // the frame changed after its HUD began
-        sharp_ = {true, &src, src.serial, sh};
-        return sh;
     }
     // The game cleared or copied into image img: if this frame's HUD went into a sharp image, that is out of date
     // (the next HUD draw enlarges the frame again).

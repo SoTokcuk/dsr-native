@@ -866,7 +866,7 @@ final class Strings {
                 "清晰的 HUD 和文字 (实验性)",
                 "清晰的 HUD 和文字 (實驗性)");
         put("sharp_n",
-                "With a render resolution below 100%, the HUD, menus and text are still drawn at your screen's resolution (up to 1080p) instead of the lower one, so they stay sharp. Costs a little GPU time.",
+                "Only with a render resolution below 100%: the HUD, menus and text are still drawn at your screen's resolution (up to 1080p) instead of the lower one, so they stay sharp. Costs a little GPU time.",
                 "Avec une résolution de rendu inférieure à 100 %, le HUD, les menus et le texte restent dessinés à la résolution de votre écran (jusqu'à 1080p) au lieu de la plus basse : ils restent nets. Coûte un peu de temps GPU.",
                 "Bei einer Renderauflösung unter 100 % werden HUD, Menüs und Text weiter in der Auflösung deines Bildschirms (bis 1080p) gezeichnet statt in der niedrigeren, damit sie scharf bleiben. Kostet etwas GPU-Zeit.",
                 "Con una risoluzione di rendering sotto il 100%, HUD, menu e testo vengono comunque disegnati alla risoluzione dello schermo (fino a 1080p) invece che a quella più bassa, così restano nitidi. Costa un po' di tempo GPU.",
