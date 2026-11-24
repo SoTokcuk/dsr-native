@@ -48,6 +48,7 @@ I have yet to test later areas in the game so don't expect performance to be ent
 - [x] Custom driver support
 - [x] Render scale / Graphics options
 - [x] Several language options
+- [x] Optional FSR 1 Support
 
 ## Roadmap
 
