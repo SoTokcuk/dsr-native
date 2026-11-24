@@ -1152,6 +1152,12 @@ jbyteArray JNICALL CheatCheck(JNIEnv* env, jclass, jbyteArray text) {
 jboolean JNICALL CheatDelete(JNIEnv*, jclass, jint i) {
     return i >= 0 && dsr::cheats::Remove(size_t(i)) ? JNI_TRUE : JNI_FALSE;
 }
+// "" while the cheats have not started; "-" once started with nothing to report; else the cheats turned off.
+jbyteArray JNICALL CheatWarning(JNIEnv* env, jclass) {
+    if (!dsr::cheats::Started()) return Bytes(env, std::string());
+    const std::string w = dsr::cheats::TakeWarning();
+    return Bytes(env, w.empty() ? std::string("-") : w);
+}
 jbyteArray JNICALL CheatText(JNIEnv* env, jclass, jint i) {
     return Bytes(env, i >= 0 ? dsr::cheats::Text(size_t(i)) : std::string());
 }
@@ -1233,6 +1239,7 @@ void StartSettingsMenu(android_app* app, const std::string& base, const dsr::Run
         {const_cast<char*>("nativeCheatCheck"), const_cast<char*>("([B)[B"), reinterpret_cast<void*>(&CheatCheck)},
         {const_cast<char*>("nativeCheatDelete"), const_cast<char*>("(I)Z"), reinterpret_cast<void*>(&CheatDelete)},
         {const_cast<char*>("nativeCheatText"), const_cast<char*>("(I)[B"), reinterpret_cast<void*>(&CheatText)},
+        {const_cast<char*>("nativeCheatWarning"), const_cast<char*>("()[B"), reinterpret_cast<void*>(&CheatWarning)},
     };
     if (env->RegisterNatives(cls, methods, int(std::size(methods))) != JNI_OK || env->ExceptionCheck()) {
         env->ExceptionClear();

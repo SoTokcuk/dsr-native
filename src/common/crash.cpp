@@ -2,8 +2,12 @@
 // write() into a stack buffer.
 #include "common/crash.h"
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <time.h>
+
+#include <atomic>
 #include <string.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -25,6 +29,28 @@ struct ModuleInfo {
 constexpr int kMaxModules = 8;
 ModuleInfo g_modules[kMaxModules];
 volatile int g_num_modules = 0;
+
+// Crash notes (SetCrashNote): two buffers, the handler reads the one published last.
+struct Note {
+    char path[512];
+    char text[4096];
+    size_t len;
+    int64_t until_ns;
+};
+Note g_notes[2];
+std::atomic<int> g_note{-1};
+
+void WriteNote() {
+    const int i = g_note.load();
+    if (i < 0) return;
+    const Note& n = g_notes[i];
+    if (MonotonicNs() >= n.until_ns) return;
+    const int fd = open(n.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    ssize_t r = write(fd, n.text, n.len);
+    (void)r;
+    close(fd);
+}
 
 constexpr int kSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP};
 struct sigaction g_old[sizeof(kSignals) / sizeof(kSignals[0])];
@@ -165,6 +191,7 @@ void Handler(int sig, siginfo_t* info, void* ctx) {
 #endif
         b.Str("=======================================\n");
         Emit(b);
+        WriteNote();
     }
     // Hand over to the previous handler (debuggerd tombstone, etc.).
     for (size_t i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++)
@@ -183,6 +210,31 @@ void InstallCrashHandler() {
     sigemptyset(&sa.sa_mask);
     for (size_t i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++) sigaction(kSignals[i], &sa, &g_old[i]);
 }
+
+int64_t MonotonicNs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return int64_t(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+
+void SetCrashNote(const char* path, const char* text, size_t len, int64_t until_ns) {
+    static std::atomic<int> writers{0};
+    if (writers.fetch_add(1) != 0) {  // one at a time (the cheats' lock already ensures it)
+        writers.fetch_sub(1);
+        return;
+    }
+    const int cur = g_note.load(), next = cur == 0 ? 1 : 0;
+    Note& n = g_notes[next];
+    strncpy(n.path, path, sizeof(n.path) - 1);
+    n.path[sizeof(n.path) - 1] = 0;
+    n.len = len < sizeof(n.text) ? len : sizeof(n.text);
+    memcpy(n.text, text, n.len);
+    n.until_ns = until_ns;
+    g_note.store(next);
+    writers.fetch_sub(1);
+}
+
+void ClearCrashNote() { g_note.store(-1); }
 
 void RegisterCrashModule(const char* name, uintptr_t base, size_t size) {
     int n = g_num_modules;

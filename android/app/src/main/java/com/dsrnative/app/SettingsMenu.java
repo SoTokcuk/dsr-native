@@ -77,6 +77,8 @@ public final class SettingsMenu {
     static native byte[] nativeCheatCheck(byte[] text);
     static native boolean nativeCheatDelete(int index);
     static native byte[] nativeCheatText(int index);
+    /** "" until the cheats start, "-" if nothing to report, else the cheats turned off after a crash. */
+    static native byte[] nativeCheatWarning();
 
     static final int REQ_DRIVER = 4101, REQ_FOLDER = 4102, REQ_CHEATS = 4103;
 
@@ -104,6 +106,53 @@ public final class SettingsMenu {
             KeepAliveService.askNotificationPermission(activity);
         }
         showFirstLaunchTip(activity);
+        checkCheatWarning(activity, 0);
+    }
+
+    /**
+     * The game crashed last time soon after cheats started: they were turned off (runtime/cheats.cpp). Tells the
+     * player once, when the cheats have started (polled for up to a minute).
+     */
+    private static void checkCheatWarning(final Activity activity, final int attempt) {
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (activity.isFinishing()) return;
+            String w;
+            try {
+                w = str(nativeCheatWarning());
+            } catch (Throwable e) {
+                return;
+            }
+            if (w.isEmpty()) {
+                if (attempt < 30) checkCheatWarning(activity, attempt + 1);
+                return;
+            }
+            if (w.equals("-")) return;
+            if (sOpen != null || TouchControls.sEditing) {  // after the menu or editor closes
+                final String names = w;
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                        () -> showCheatWarning(activity, names), 3000);
+                return;
+            }
+            showCheatWarning(activity, w);
+        }, attempt == 0 ? 2500 : 2000);
+    }
+
+    private static void showCheatWarning(final Activity activity, final String names) {
+        if (activity.isFinishing()) return;
+        try {
+            AlertDialog d = new AlertDialog.Builder(activity, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle(Strings.t("cheat_crash_t"))
+                    .setMessage(Strings.t("cheat_crash", names))
+                    .setPositiveButton(Strings.t("ok"), null)
+                    .create();
+            d.setOnDismissListener(x -> {
+                if (sOpen == null && !TouchControls.sEditing) nativeMenuOpen(false);
+            });
+            nativeMenuOpen(true);  // the game waits while it shows
+            GameActivity.showImmersive(d);
+        } catch (Exception e) {
+            android.util.Log.w("DSRNative", "cheats: could not show the crash warning", e);
+        }
     }
 
     /** The first time the game starts: how to open this menu. */

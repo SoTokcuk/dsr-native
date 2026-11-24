@@ -999,6 +999,20 @@ final class Strings {
                 "Dark Souls", "Dark Souls", "Dark Souls", "Dark Souls");
         put("skin_classic", "Classic", "Classique", "Klassisch", "Classico", "Clásico", "Clássico", "Классическое",
                 "クラシック", "클래식", "经典", "經典");
+        put("cheat_crash_t", "Cheats turned off", "Codes de triche désactivés", "Cheats ausgeschaltet",
+                "Trucchi disattivati", "Trucos desactivados", "Trapaças desligadas", "Читы отключены",
+                "チートをオフにしました", "치트를 껐습니다", "已关闭作弊码", "已關閉作弊碼");
+        put("cheat_crash", "The game crashed last time soon after these cheats started: %s.\n\nThey have been turned off so the game can run. Cheats made for another version or edition of the game (or that change its code in ways DSR Native does not support) often crash it. You can turn them back on in the Cheats tab.",
+                "Le jeu a planté la dernière fois peu après le démarrage de ces codes : %s.\n\nIls ont été désactivés pour que le jeu puisse tourner. Les codes faits pour une autre version ou édition du jeu (ou qui modifient son code d'une façon que DSR Native ne prend pas en charge) le font souvent planter. Vous pouvez les réactiver dans l'onglet Codes de triche.",
+                "Das Spiel ist beim letzten Mal kurz nach dem Start dieser Cheats abgestürzt: %s.\n\nSie wurden ausgeschaltet, damit das Spiel läuft. Cheats für eine andere Version oder Edition des Spiels (oder die seinen Code auf eine Weise ändern, die DSR Native nicht unterstützt) bringen es oft zum Absturz. Im Cheats-Tab kannst du sie wieder einschalten.",
+                "L'ultima volta il gioco si è bloccato poco dopo l'avvio di questi trucchi: %s.\n\nSono stati disattivati perché il gioco possa funzionare. I trucchi creati per un'altra versione o edizione del gioco (o che ne modificano il codice in modi non supportati da DSR Native) spesso lo fanno bloccare. Puoi riattivarli nella scheda Trucchi.",
+                "La última vez el juego se cerró poco después de que empezaran estos trucos: %s.\n\nSe han desactivado para que el juego funcione. Los trucos hechos para otra versión o edición del juego (o que cambian su código de formas que DSR Native no admite) suelen cerrarlo. Puedes volver a activarlos en la pestaña Trucos.",
+                "Da última vez o jogo travou logo depois que estas trapaças começaram: %s.\n\nElas foram desligadas para que o jogo funcione. Trapaças feitas para outra versão ou edição do jogo (ou que mudam o código dele de formas que o DSR Native não suporta) costumam travá-lo. Você pode ligá-las de novo na aba Trapaças.",
+                "В прошлый раз игра вылетела вскоре после запуска этих читов: %s.\n\nОни отключены, чтобы игра могла работать. Читы для другой версии или издания игры (или меняющие её код так, как DSR Native не поддерживает) часто приводят к вылету. Включить их снова можно на вкладке «Читы».",
+                "前回、これらのチートの開始直後にゲームがクラッシュしました：%s。\n\nゲームを動かせるようオフにしました。別のバージョンやエディション用のチート（または DSR Native が対応しない形でコードを変更するもの）はクラッシュの原因になりがちです。チートタブで再びオンにできます。",
+                "지난번에 이 치트들이 시작된 직후 게임이 종료되었습니다: %s.\n\n게임이 실행되도록 껐습니다. 다른 버전이나 에디션용 치트(또는 DSR Native가 지원하지 않는 방식으로 코드를 바꾸는 치트)는 자주 게임을 종료시킵니다. 치트 탭에서 다시 켤 수 있습니다.",
+                "上次这些作弊码开始运行后不久游戏就崩溃了：%s。\n\n已将它们关闭，以便游戏可以运行。为其他版本或版本类型制作的作弊码（或以 DSR Native 不支持的方式修改游戏代码的作弊码）经常导致崩溃。可在“作弊码”标签中重新打开。",
+                "上次這些作弊碼開始執行後不久遊戲就當機了：%s。\n\n已將它們關閉，讓遊戲可以執行。為其他版本或版本類型製作的作弊碼（或以 DSR Native 不支援的方式修改遊戲程式碼的作弊碼）經常導致當機。可在「作弊碼」分頁中重新開啟。");
         // ---- First launch
         put("tip_t", "Settings menu", "Menu des paramètres", "Einstellungsmenü", "Menu impostazioni", "Menú de ajustes",
                 "Menu de configurações", "Меню настроек", "設定メニュー", "설정 메뉴", "设置菜单", "設定選單");

@@ -3,8 +3,11 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -15,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/crash.h"
 #include "common/log.h"
 #include "common/platform.h"
 #include "hle/input.h"
@@ -39,8 +43,16 @@ std::vector<Entry> g_entries;
 std::mutex g_program_mutex;
 std::shared_ptr<const std::vector<uint32_t>> g_program;  // master codes, then the enabled cheats
 std::atomic<bool> g_started{false};
+// After a crash soon after cheats started (see ArmCrashNote): master codes are not run this session (the player can
+// turn them back on by turning any cheat on), and the warning for the settings menu.
+bool g_masters_paused = false;
+std::string g_warning;
+
+// A crash this soon after the cheats that are on started (game start, or one turned on) is blamed on them.
+constexpr int64_t kCrashWindowNs = 180'000'000'000;  // 3 minutes
 
 std::string OwnFile() { return g_dir + "/" + g_build + ".txt"; }
+std::string CrashedFile() { return g_dir + "/" + g_build + ".crashed"; }
 std::string EnabledFile() { return g_dir + "/" + g_build + ".enabled"; }
 
 bool ReadFile(const std::string& path, std::string* out) {
@@ -117,16 +129,74 @@ void SaveEnabled() {
 
 // The program run 12 times a second: master codes first (Atmosphère runs them first too), then the enabled cheats,
 // each with the conditional blocks it leaves open closed.
-void Rebuild() {
+// Running cheats can crash the game (cheats for another version or edition write the wrong places; some codes do
+// not suit DSR Native). The crash handler is told which cheats are on: if the game crashes within kCrashWindowNs,
+// it writes them to <BUILD ID>.crashed, and the next start turns them off and warns the player (TakeWarning).
+// Since `fresh`: a cheat was just turned on, or the game just started: the window starts again.
+void ArmCrashNote(bool fresh) {
+    std::string text;
+    for (const Entry& e : g_entries)
+        if (e.enabled && e.cheat.error.empty() && (!e.cheat.master || !g_masters_paused))
+            text += std::string(e.cheat.master ? "master\t" : "on\t") + e.cheat.name + "\n";
+    if (text.empty()) {
+        ClearCrashNote();
+        return;
+    }
+    static int64_t until = 0;
+    if (fresh || until == 0) until = MonotonicNs() + kCrashWindowNs;
+    SetCrashNote(CrashedFile().c_str(), text.data(), text.size(), until);
+}
+
+void Rebuild(bool fresh = false) {
     auto prog = std::make_shared<std::vector<uint32_t>>();
     for (int pass = 0; pass < 2; pass++)
         for (const Entry& e : g_entries) {
             if (!e.cheat.error.empty() || e.cheat.master != (pass == 0) || (!e.cheat.master && !e.enabled)) continue;
+            if (e.cheat.master && g_masters_paused) continue;
             prog->insert(prog->end(), e.cheat.code.begin(), e.cheat.code.end());
             for (int i = OpenBlocks(e.cheat.code); i > 0; i--) prog->push_back(0x20000000);
         }
-    std::lock_guard<std::mutex> lk(g_program_mutex);
-    g_program = std::move(prog);
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        g_program = std::move(prog);
+    }
+    ArmCrashNote(fresh);
+}
+
+// The previous session crashed soon after cheats started (<BUILD ID>.crashed): those cheats are turned off (master
+// codes paused for this session) and the player is told. Under g_mutex, after Load.
+void HandleCrashNote() {
+    std::string text;
+    if (!ReadFile(CrashedFile(), &text)) return;
+    remove(CrashedFile().c_str());
+    std::set<std::string> on, masters;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t e = text.find('\n', pos);
+        if (e == std::string::npos) e = text.size();
+        const std::string line = text.substr(pos, e - pos);
+        pos = e + 1;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        (line.compare(0, tab, "master") == 0 ? masters : on).insert(line.substr(tab + 1));
+    }
+    std::string names;
+    for (Entry& e : g_entries) {
+        if (e.cheat.master ? !masters.count(e.cheat.name) : !(e.enabled && on.count(e.cheat.name))) continue;
+        if (e.cheat.master) {
+            g_masters_paused = true;
+        } else {
+            e.enabled = false;
+        }
+        if (names.find("\"" + e.cheat.name + "\"") == std::string::npos)
+            names += std::string(names.empty() ? "" : ", ") + "\"" + e.cheat.name + "\"" + (e.cheat.master ? " (master code)" : "");
+    }
+    if (names.empty()) return;
+    SaveEnabled();
+    Rebuild();
+    g_warning = names;
+    LOGW(kTag, "the game crashed last time soon after these cheats started: %s. They are off now%s.", names.c_str(),
+         g_masters_paused ? " (master codes paused until a cheat is turned on)" : "");
 }
 
 // (Re)reads every cheat file for the build. Under g_mutex.
@@ -174,8 +244,7 @@ public:
     }
     bool Read(uint64_t addr, void* out, size_t size) override {
         if (!Valid(addr, size)) return false;
-        memcpy(out, reinterpret_cast<const void*>(uintptr_t(addr)), size);
-        return true;
+        return SafeCopy(out, reinterpret_cast<const void*>(uintptr_t(addr)), size, false);
     }
     bool Write(uint64_t addr, const void* in, size_t size) override {
         if (!Valid(addr, size)) return false;
@@ -198,14 +267,40 @@ public:
                 return true;
             }
         }
-        memcpy(reinterpret_cast<void*>(uintptr_t(addr)), in, size);
-        return true;
+        return SafeCopy(reinterpret_cast<void*>(uintptr_t(addr)), in, size, true);
     }
     void Log(const std::string& line) override {
         if (logs_++ < 200) LOGI(kTag, "%s", line.c_str());
     }
 
 private:
+    // Copies to or from the game's memory without crashing on a page that is not there or not writable: through
+    // process_vm_readv / writev on our own process (an error, not a fault). If the kernel refuses those calls, a
+    // plain copy (the ranges are checked by Valid).
+    bool SafeCopy(void* dst, const void* src, size_t size, bool to_game) {
+        if (vm_calls_ok_) {
+            iovec local{to_game ? const_cast<void*>(src) : dst, size};
+            iovec remote{to_game ? dst : const_cast<void*>(src), size};
+            const ssize_t n = to_game ? process_vm_writev(getpid(), &local, 1, &remote, 1, 0)
+                                      : process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+            if (n == ssize_t(size)) return true;
+            if (n < 0 && (errno == ENOSYS || errno == EPERM)) {
+                vm_calls_ok_ = false;
+                LOGW(kTag, "process_vm_%s not allowed (%s): plain copies", to_game ? "writev" : "readv",
+                     strerror(errno));
+            } else {
+                if (fault_logs_++ < 8)
+                    LOGW(kTag, "a cheat %s %p, which is not %s: skipped", to_game ? "writes" : "reads",
+                         to_game ? dst : src, to_game ? "writable" : "readable");
+                return false;
+            }
+        }
+        memcpy(dst, src, size);
+        return true;
+    }
+    bool vm_calls_ok_ = true;
+    size_t fault_logs_ = 0;
+
     static bool Valid(uint64_t addr, size_t size) {
         const loader::Module& m = GetRuntime().main;
         const uint64_t mb = m.base(), me = mb + m.nso().image_size();
@@ -298,6 +393,8 @@ void Start(const std::string& dir) {
         for (char& c : g_build) c = char(toupper(static_cast<unsigned char>(c)));
         mkdir(dir.c_str(), 0775);
         Load();
+        HandleCrashNote();
+        Rebuild(true);  // the crash window starts with the game
         if (g_entries.empty())
             LOGI(kTag, "no cheats for build %s (put them in %s)", g_build.c_str(), OwnFile().c_str());
         else
@@ -322,11 +419,12 @@ bool SetEnabled(size_t index, bool on) {
     Entry& e = g_entries[index];
     if (!e.cheat.error.empty() || e.cheat.master) return false;
     e.enabled = on;
+    if (on) g_masters_paused = false;  // the player is trying cheats again: master codes run again too
     // Cheats with the same name (in two files) go on and off together: the saved list is by name.
     for (Entry& o : g_entries)
         if (o.cheat.name == e.cheat.name && o.cheat.error.empty() && !o.cheat.master) o.enabled = on;
     SaveEnabled();
-    Rebuild();
+    Rebuild(on);
     LOGI(kTag, "\"%s\" %s", e.cheat.name.c_str(), on ? "on" : "off");
     return true;
 }
@@ -375,6 +473,15 @@ std::string Check(const std::string& text) {
         if (!c.error.empty()) return c.name + ": " + c.error;
     return std::string();
 }
+
+std::string TakeWarning() {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    std::string w;
+    w.swap(g_warning);
+    return w;
+}
+
+bool Started() { return g_started.load(); }
 
 std::string Text(size_t index) {
     std::lock_guard<std::mutex> lk(g_mutex);

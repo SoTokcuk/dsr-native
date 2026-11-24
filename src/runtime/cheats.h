@@ -24,5 +24,9 @@ bool Remove(size_t index);
 std::string Check(const std::string& text);
 // The cheat as written in its file (for showing its codes).
 std::string Text(size_t index);
+// The cheats turned off at this start because the game crashed soon after they started last time (names, quoted,
+// comma-separated), once; "" if none. Started: Start has run.
+std::string TakeWarning();
+bool Started();
 
 }  // namespace dsr::cheats

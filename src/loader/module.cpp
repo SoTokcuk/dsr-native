@@ -119,9 +119,14 @@ bool Module::WriteReadOnly(uint64_t off, const void* data, size_t size) {
     if (mprotect(reinterpret_cast<void*>(page_lo), page_hi - page_lo, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
         return false;
     memcpy(reinterpret_cast<void*>(addr), data, size);
+    // Back to what Protect gave each page. On 16 KiB-page devices a page can hold the end of .rodata and the start
+    // of .data: it must stay writable (made read-only, the game's next write there crashed).
     for (uintptr_t p = page_lo; p < page_hi; p += host_page_) {
-        const bool text = p - base_ < uint64_t(nso_->text.mem_offset) + nso_->text.size;
-        mprotect(reinterpret_cast<void*>(p), host_page_, text ? PROT_READ | PROT_EXEC : PROT_READ);
+        const size_t pg = (p - base_) / host_page_;
+        int prot = PROT_READ;
+        if (pg < page_prot_.size()) prot = page_prot_[pg];
+        else if (p - base_ < uint64_t(nso_->text.mem_offset) + nso_->text.size) prot = PROT_READ | PROT_EXEC;
+        mprotect(reinterpret_cast<void*>(p), host_page_, prot);
     }
     arch::FlushICache(reinterpret_cast<void*>(addr), size);
     return true;
@@ -277,6 +282,7 @@ bool Module::Protect(std::string* err) {
         pg = run;
     }
     if (rwx_pages) LOGW(kTag, "%zu host page(s) needed RWX (segment boundary inside a page)", rwx_pages);
+    page_prot_ = prot;
     arch::FlushICache(reinterpret_cast<void*>(base_), nso_->text.size);
     return true;
 }

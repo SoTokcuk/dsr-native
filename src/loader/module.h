@@ -81,6 +81,7 @@ private:
     uintptr_t base_ = 0;
     size_t size_ = 0;       // reserved size (page aligned)
     size_t host_page_ = 4096;
+    std::vector<int> page_prot_;  // each host page's protection as Protect set it (WriteReadOnly restores it)
     std::vector<ImportBinding> imports_;
     void* thunk_block_ = nullptr;
     size_t thunk_block_size_ = 0;
