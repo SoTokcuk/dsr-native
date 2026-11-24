@@ -4858,6 +4858,41 @@ private:
         return img;
     }
 
+    // Depth stand-in for a shadow slot that ended up with a colour image (see the texture loop). 1x1 and cleared
+    // to 0, so the game's shadow comparisons read "lit"; one per dimension, like Fallback. 1D/3D shadow maps do not
+    // exist in this game, and a depth image of those types is not portable, so they keep the colour stand-in.
+    std::map<int, Image*> fallbacks_depth_;
+    uint64_t shadow_standins_ = 0;
+    Image* FallbackDepth(shader::TexDim dim, bool array) {
+        if (dim != shader::TexDim::D2 && dim != shader::TexDim::Cube) return nullptr;
+        const int key = int(dim) * 2 + (array ? 1 : 0);
+        auto it = fallbacks_depth_.find(key);
+        if (it != fallbacks_depth_.end()) return it->second;
+        TexRef t;
+        t.valid = true;
+        t.addr = 0x800 + uint64_t(key);  // never a real guest address
+        t.tex.format = 50;               // D16_UNORM: the smallest sampled depth format
+        t.tex.width = t.tex.height = 1;
+        t.tex.levels = 1;
+        t.tex.depth = 1;
+        t.tex.target = dim == shader::TexDim::Cube ? kTargetCubemap : (array ? kTarget2DArray : kTarget2D);
+        Image* img = CreateImage(t);
+        if (img) {
+            Begin();
+            EndRendering();
+            Transition(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            const VkClearDepthStencilValue zero{0.0f, 0};
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, uint32_t(img->layers)};
+            Rec([zero, range, image = img->image](VkCommandBuffer cb) {
+                vkCmdClearDepthStencilImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+            });
+            Transition(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            img->written = img->uploaded = true;
+        }
+        fallbacks_depth_[key] = img;
+        return img;
+    }
+
     // This game does not bind textures through NVN: it writes texture handles (from
     // nvnDeviceGetTextureHandle) into its own uniform buffer at binding 10, which shaders read as
     // c[13][0x20 + 8 * slot]. Read the handle from there and resolve it like a bind would.
@@ -5217,6 +5252,16 @@ private:
                     img = DepthSnapshot(*depth, st_.rts[size_t(st_.num_rt)]);
                     if (!img) return Skip("texture is also the depth target");
                 }
+                // A shadow slot is a depth-compare sampler. The game sometimes binds a colour placeholder there (a
+                // missing texture's white stand-in, or the 16x16 black texture it uses while an area loads). A
+                // compare sampler on a colour image is undefined in Vulkan and faults some tile GPUs, so such a slot
+                // gets a 1x1 depth stand-in (cleared to 0, the game's "lit" direction) instead.
+                if (shadow && !IsDepthFormat(img->nvn_format)) {
+                    if (Image* fb = FallbackDepth(info.texture_dim[slot], info.texture_array[slot])) {
+                        img = fb;
+                        shadow_standins_++;
+                    }
+                }
                 if (stage == 0 && img->frag_only_sync && img->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
                     !img->clear_pending) {  // mali_barriers: released to fragment shaders only
                     EndRendering();
@@ -5271,8 +5316,9 @@ private:
                              bt.texture.tex.target, bt.texture.view_layers, bt.texture.layer);
                     // The game binds a placeholder of another dimension (a 16x16 black 2D texture where the shader
                     // samples a cube map); the hardware samples it anyway. A black stand-in of the right dimension
-                    // keeps the draw (it was skipped: objects went missing).
-                    img = Fallback(info.texture_dim[slot], info.texture_array[slot], true);
+                    // keeps the draw (it was skipped: objects went missing). A shadow slot needs a depth image.
+                    img = shadow ? FallbackDepth(info.texture_dim[slot], info.texture_array[slot]) : nullptr;
+                    if (!img) img = Fallback(info.texture_dim[slot], info.texture_array[slot], true);
                     if (img && img->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
                         EndRendering();
                         Transition(*img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -7187,11 +7233,13 @@ private:
                  (unsigned long long)geo_rechecks_);
             list_b2b_copies_ = list_updates_ = geo_rechecks_ = 0;
         }
-        if (padded_fetches_ || view_standins_) {
+        if (padded_fetches_ || view_standins_ || shadow_standins_) {
             LOGI(kTag, "draws reading vertex data past their bound buffer: %llu; with a stand-in for a "
-                 "texture of the wrong dimension: %llu", (unsigned long long)padded_fetches_,
-                 (unsigned long long)view_standins_);
+                 "texture of the wrong dimension: %llu; shadow slots given a depth stand-in: %llu",
+                 (unsigned long long)padded_fetches_, (unsigned long long)view_standins_,
+                 (unsigned long long)shadow_standins_);
             padded_fetches_ = view_standins_ = 0;
+            shadow_standins_ = 0;
         }
         if (images_retired_) {
             LOGI(kTag, "images replaced by new textures in the same memory: %llu (destroyed after the GPU is done)",
