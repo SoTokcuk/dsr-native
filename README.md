@@ -121,12 +121,39 @@ many passes were split.
 A single draw that by itself references more vertices than the limit cannot be fixed by splitting the
 pass; the log names that case once.
 
+The range estimate is only as good as the index scan behind it. That scan used to remember a buffer's
+min/max index keyed by a 16-spot checksum, so a streaming index buffer (particles, skinned meshes, UI)
+rewritten between frames often kept its old, too-small range: the estimate stayed low, the guard never
+split, and the GPU faulted anyway. Small index buffers (up to 256 KB) are now hashed in full so a rewrite
+is always noticed — the same fix the geometry cache already uses for vertex data.
+
 ### 6. Device-fault diagnostics
 
 `VK_EXT_device_fault` is enabled when the driver offers it. On `VK_ERROR_DEVICE_LOST` the backend logs the
 driver's own description, the fault addresses and vendor fault codes instead of only `-4`. On Mali the
 description distinguishes a tile-heap overflow from an invalid GPU address, which is exactly what a bug
 report needs.
+
+### 7. Recovery from a lost GPU device
+
+Even with the split guard, a fault can still slip through (a single oversized draw, or a driver page
+fault). When that happens the logical Vulkan device is lost: every submit fails and no fence ever signals
+again. The renderer used to keep waiting on those dead fences — 60 s per frame, forever — which is the
+"random freeze at 0 fps" this fork was chased for.
+
+Now a lost device is **rebuilt while the game keeps running**. The instance, physical device and surface
+survive a device loss, so at the next frame the render thread quiesces its worker threads (recorder, copy,
+pipeline compilers, texture conversion), destroys every device object, empties the caches, and creates a
+fresh device. Images, pipelines, samplers, the geometry cache and post-processing are then made again
+lazily from game memory over the next frames, exactly as on a cold start — no restart, no lost progress.
+The log shows:
+
+```
+GPU device lost: rebuilding the Vulkan device (the game continues from the last frame)
+Vulkan device rebuilt: rendering resumes
+```
+
+If the device cannot be recreated, the game continues without graphics rather than freezing.
 
 ### Kept from upstream
 
@@ -288,7 +315,9 @@ If the picture flickers or effects disappear, try (one at a time, restart betwee
 - Mali flicker reports still exist upstream; the switches above isolate the renderer path.
 - Very old Mali GPUs (Mali-G51, driver r18) may show a black game image despite a running game; see
   upstream issue #78.
-- A single draw referencing more than the 180 MB limit can still lose the device; the log names it.
+- A single draw referencing more than the 180 MB limit can still lose the device; the log names it, and the
+  device is then rebuilt automatically (see [Recovery from a lost GPU device](#7-recovery-from-a-lost-gpu-device))
+  instead of freezing at 0 fps.
 - The game's own autosave is written when resting at a bonfire; a device loss before the next rest loses
   progress since the last save.
 - Adreno is not tuned in this fork; upstream settings still work.

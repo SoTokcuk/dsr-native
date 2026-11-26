@@ -915,6 +915,7 @@ public:
         MsTimer timer(exec_ms_);
         const ListMarks marks = Marks();
         if (!EnsureDevice()) return;
+        if (device_lost_.load(std::memory_order_acquire) && !RecoverDevice()) return;
         StartRecorder();
         ResetTransient();
         list_counter_++;
@@ -1379,6 +1380,7 @@ public:
     void Present(const TexRef& tex) override {
         std::lock_guard<std::mutex> lk(m_);
         if (!EnsureDevice()) return;
+        if (device_lost_.load(std::memory_order_acquire) && !RecoverDevice()) return;
         ReportDraws();
         occ_frame_++;
         if (occ_still_ < 1000000) occ_still_++;  // OccCamera sets it back to 0 when the camera moves
@@ -1465,6 +1467,7 @@ private:
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
                 swapchain_dirty_ = true;
             } else {
+                if (r == VK_ERROR_DEVICE_LOST) NoteDeviceLost();
                 static std::atomic<bool> logged{false};
                 if (!logged.exchange(true)) LOGW(kTag, "vkAcquireNextImageKHR failed: %d", r);
             }
@@ -1512,6 +1515,7 @@ private:
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
             swapchain_dirty_ = true;
         } else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+            if (r == VK_ERROR_DEVICE_LOST) NoteDeviceLost();
             static std::atomic<bool> logged{false};
             if (!logged.exchange(true)) LOGW(kTag, "vkQueuePresentKHR failed: %d", r);
         }
@@ -1616,15 +1620,23 @@ private:
         en.geometryShader = have.features.geometryShader;  // gl_PrimitiveID in fragment shaders
         en.shaderStorageImageWriteWithoutFormat = have.features.shaderStorageImageWriteWithoutFormat;
         features_ = en;
-        VkPhysicalDeviceVulkan13Features en13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
-        en13.dynamicRendering = have13.dynamicRendering;
-        VkPhysicalDeviceFeatures2 en2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-        en2.features = en;
-        if (v13) en2.pNext = &en13;
+        feat13_ = VkPhysicalDeviceVulkan13Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        feat13_.dynamicRendering = have13.dynamicRendering;
+        feat2_ = VkPhysicalDeviceFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        feat2_.features = en;
+        feat2_.pNext = v13 ? &feat13_ : nullptr;
         LOGI(kTag, "features: dynamic rendering %d, BC textures %d, ETC2 textures %d, anisotropy %d, gather-extended %d",
-             int(en13.dynamicRendering), int(en.textureCompressionBC), int(en.textureCompressionETC2),
+             int(feat13_.dynamicRendering), int(en.textureCompressionBC), int(en.textureCompressionETC2),
              int(en.samplerAnisotropy), int(en.shaderImageGatherExtended));
+        return CreateDeviceAndSlots();
+    }
 
+    // The logical device and everything created straight from it (queue, command pool, the slots' command buffers,
+    // fences, query pools, descriptor pools and streams, the present semaphores, the pipeline cache). Split out of
+    // EnsureDevice so a lost device can be rebuilt (RecoverDevice) without touching the instance / physical device,
+    // which stay valid across a VK_ERROR_DEVICE_LOST. Everything else (images, pipelines, samplers, the geometry
+    // cache, post-processing) is made lazily afterwards and rebuilds itself from game memory on the next frames.
+    bool CreateDeviceAndSlots() {
         float prio = 1.0f;
         VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
         qci.queueFamilyIndex = family_;
@@ -1675,12 +1687,12 @@ private:
             if (device_fault_) LOGI(kTag, "device fault reporting: VK_EXT_device_fault");
         }
         VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        dci.pNext = &en2;
+        dci.pNext = &feat2_;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
         dci.enabledExtensionCount = ndev_ext;
         dci.ppEnabledExtensionNames = dev_ext;
-        r = vkCreateDevice(phys_, &dci, nullptr, &device_);
+        VkResult r = vkCreateDevice(phys_, &dci, nullptr, &device_);
         if (r != VK_SUCCESS) {
             LOGE(kTag, "vkCreateDevice failed: %d — continuing without graphics", r);
             device_ = VK_NULL_HANDLE;
@@ -1721,9 +1733,9 @@ private:
                      rh, target_h);
             }
         }
-        if (en13.dynamicRendering && dsr::GetRuntime().config.render_pass_objects)
+        if (feat13_.dynamicRendering && dsr::GetRuntime().config.render_pass_objects)
             LOGI(kTag, "settings render_pass_objects = 1: render pass objects instead of the driver's dynamic rendering");
-        else if (en13.dynamicRendering) {
+        else if (feat13_.dynamicRendering) {
             begin_rendering_ = reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(device_, "vkCmdBeginRendering"));
             end_rendering_ = reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(device_, "vkCmdEndRendering"));
         }
@@ -1804,6 +1816,273 @@ private:
         LoadPipelineCache();
         init_failed_ = false;
         LOGI(kTag, "device ready (queue family %u)", family_);
+        return true;
+    }
+
+    // ---- recovery from VK_ERROR_DEVICE_LOST ------------------------------------------------------------------
+    // A Mali GPU fault (for example the 180 MB intermediate-geometry limit, or a driver page fault) loses the logical
+    // device: every submit fails and no fence ever signals again. Waiting on those fences froze the game at 0 fps
+    // forever. The instance, physical device and surface stay valid across a device loss, so the device and everything
+    // created from it can be rebuilt while the game keeps running: the caches below are emptied and every resource
+    // (images, pipelines, samplers, the geometry cache, post-processing) is made again lazily from game memory over
+    // the next frames, exactly as on a cold start. The render thread does this between lists, with the worker threads
+    // quiesced so none of them touches the old device while it is torn down.
+    void WaitWorkersIdle() {
+        Drain();          // recorder: its queued ops ran (their submits failed); it now sleeps until more are queued
+        FinishCopies();   // copy worker: every queued memcpy done
+        // Pipeline compilers: no queued job and none inside BuildPipeline.
+        for (;;) {
+            bool queued;
+            {
+                std::lock_guard<std::mutex> lk(compile_mutex_);
+                queued = !compile_queue_.empty();
+            }
+            if (!queued && compiles_active_.load(std::memory_order_acquire) == 0) break;
+            std::this_thread::yield();
+        }
+        // Background texture conversion: no queued conversion and none being processed.
+        for (;;) {
+            bool queued;
+            {
+                std::lock_guard<std::mutex> lk(bg_mutex_);
+                queued = !bg_queue_.empty();
+            }
+            if (!queued && !bg_busy_.load(std::memory_order_acquire)) break;
+            std::this_thread::yield();
+        }
+        // Pre-hash workers only read game memory and write host-side results: no Vulkan, safe to leave running.
+    }
+    // Destroys every object created from device_ and empties the caches that name them, so nothing stale survives
+    // into the rebuilt device. Called with the workers idle. On a lost device the driver frees the underlying memory
+    // when the device goes; the explicit destroys keep it tidy and match the object lifetime the spec asks for.
+    void DestroyDeviceObjects() {
+        auto kill_image = [this](Image& img) {
+            for (auto& [k, v] : img.views)
+                if (v) vkDestroyImageView(device_, v, nullptr);
+            if (img.image) vkDestroyImage(device_, img.image, nullptr);
+            if (img.memory) vkFreeMemory(device_, img.memory, nullptr);
+            img = Image{};
+        };
+        // Images (the game's textures and render targets), the sharp-HUD enlargements, post-processing targets.
+        for (auto& [addr, img] : images_) kill_image(img);
+        images_.clear();
+        for (auto& [serial, e] : sharp_imgs_) kill_image(e.img);
+        sharp_imgs_.clear();
+        kill_image(post_fxaa_img_);
+        kill_image(post_fsr_tmp_);
+        // Retired images still waiting for the GPU (it is lost: they will never finish, destroy them now).
+        for (Retired& r : retired_) {
+            for (VkImageView v : r.views)
+                if (v) vkDestroyImageView(device_, v, nullptr);
+            if (r.image) vkDestroyImage(device_, r.image, nullptr);
+            if (r.memory) vkFreeMemory(device_, r.memory, nullptr);
+        }
+        retired_.clear();
+        // Images kept aside because their memory was reused as another texture (the player's face and similar).
+        for (auto& [key, p] : parked_) kill_image(p.img);
+        parked_.clear();
+        // Frame capture readback images, if a capture was interrupted by the fault.
+        for (CaptureItem& it : capture_items_) {
+            if (it.buffer) vkDestroyBuffer(device_, it.buffer, nullptr);
+            if (it.memory) vkFreeMemory(device_, it.memory, nullptr);
+            if (it.image) vkDestroyImage(device_, it.image, nullptr);
+            if (it.image_memory) vkFreeMemory(device_, it.image_memory, nullptr);
+        }
+        capture_items_.clear();
+        capture_active_ = false;
+        // Samplers, shader modules, descriptor set layouts, pipeline layouts, pipelines.
+        for (auto& [k, s] : samplers_)
+            if (s) vkDestroySampler(device_, s, nullptr);
+        samplers_.clear();
+        samplers_fast_.Clear();
+        for (auto& [k, sh] : shaders_)
+            if (sh.module) vkDestroyShaderModule(device_, sh.module, nullptr);
+        shaders_.clear();
+        shaders_fast_.Clear();
+        for (auto& [k, l] : set_layouts_)
+            if (l) vkDestroyDescriptorSetLayout(device_, l, nullptr);
+        set_layouts_.clear();
+        set_layouts_fast_.clear();
+        for (auto& [k, l] : pipeline_layouts_)
+            if (l) vkDestroyPipelineLayout(device_, l, nullptr);
+        pipeline_layouts_.clear();
+        for (auto& [k, p] : pipelines_)
+            if (p) vkDestroyPipeline(device_, p, nullptr);
+        pipelines_.clear();
+        pipelines_fast_.Clear();
+        // Render pass objects and framebuffers (the no-dynamic-rendering fallback).
+        for (auto& [k, rp] : render_passes_cache_)
+            if (rp) vkDestroyRenderPass(device_, rp, nullptr);
+        render_passes_cache_.clear();
+        for (auto& [k, fb] : fb_cache_)
+            if (fb) vkDestroyFramebuffer(device_, fb, nullptr);
+        fb_cache_.clear();
+        // Post-processing modules, layouts, sampler and pipelines.
+        if (post_vs_) vkDestroyShaderModule(device_, post_vs_, nullptr);
+        if (post_fsr_vs_) vkDestroyShaderModule(device_, post_fsr_vs_, nullptr);
+        for (VkShaderModule m : post_fs_)
+            if (m) vkDestroyShaderModule(device_, m, nullptr);
+        post_vs_ = post_fsr_vs_ = VK_NULL_HANDLE;
+        for (VkShaderModule& m : post_fs_) m = VK_NULL_HANDLE;
+        if (post_set_layout_) vkDestroyDescriptorSetLayout(device_, post_set_layout_, nullptr);
+        if (post_layout_) vkDestroyPipelineLayout(device_, post_layout_, nullptr);
+        if (post_sampler_) vkDestroySampler(device_, post_sampler_, nullptr);
+        post_set_layout_ = VK_NULL_HANDLE;
+        post_layout_ = VK_NULL_HANDLE;
+        post_sampler_ = VK_NULL_HANDLE;
+        for (PostPipe& pp : post_pipes_) {
+            if (pp.pipe) vkDestroyPipeline(device_, pp.pipe, nullptr);
+            // pp.rp is a render pass from render_passes_cache_ (destroyed above): do not destroy it twice.
+        }
+        post_pipes_.clear();
+        post_ready_ = post_failed_ = fsr_ready_ = false;
+        // Geometry cache buffer and its entries.
+        if (geo_buf_) vkDestroyBuffer(device_, geo_buf_, nullptr);
+        if (geo_mem_) vkFreeMemory(device_, geo_mem_, nullptr);
+        geo_buf_ = VK_NULL_HANDLE;
+        geo_mem_ = VK_NULL_HANDLE;
+        geo_ptr_ = nullptr;
+        geo_off_ = 0;
+        geo_failed_ = false;
+        geo_.Clear();
+        geo_lo_ = UINTPTR_MAX;
+        geo_hi_ = 0;
+        // Query pools (frame capture / GPU timing).
+        if (query_pool_) vkDestroyQueryPool(device_, query_pool_, nullptr);
+        if (ts_pool_) vkDestroyQueryPool(device_, ts_pool_, nullptr);
+        query_pool_ = ts_pool_ = VK_NULL_HANDLE;
+        ts_count_ = 0;
+        query_pass_.clear();
+        // Descriptor pools and the sets cached from them (the sets go with the pools).
+        desc_cache_.Clear();
+        persist_cache_.Clear();
+        if (persist_pool_) vkDestroyDescriptorPool(device_, persist_pool_, nullptr);
+        persist_pool_ = VK_NULL_HANDLE;
+        // The slots: command buffers (via the pool), fences, query pools, descriptor pools, streams, framebuffers.
+        for (Slot& sl : slots_) {
+            if (sl.fence) vkDestroyFence(device_, sl.fence, nullptr);
+            if (sl.ts) vkDestroyQueryPool(device_, sl.ts, nullptr);
+            if (sl.occ) vkDestroyQueryPool(device_, sl.occ, nullptr);
+            if (sl.pool) vkDestroyDescriptorPool(device_, sl.pool, nullptr);
+            for (VkDescriptorPool p : sl.extra_pools)
+                if (p) vkDestroyDescriptorPool(device_, p, nullptr);
+            for (VkFramebuffer fb : sl.framebuffers)
+                if (fb) vkDestroyFramebuffer(device_, fb, nullptr);
+            if (sl.stream) vkDestroyBuffer(device_, sl.stream, nullptr);
+            if (sl.mem) vkFreeMemory(device_, sl.mem, nullptr);
+            sl.cmd = VK_NULL_HANDLE;
+            sl.fence = VK_NULL_HANDLE;
+            sl.ts = VK_NULL_HANDLE;
+            sl.occ = VK_NULL_HANDLE;
+            sl.pool = VK_NULL_HANDLE;
+            sl.stream = VK_NULL_HANDLE;
+            sl.mem = VK_NULL_HANDLE;
+            sl.ptr = nullptr;
+            sl.pending = false;
+            sl.ts_written = false;
+            sl.occ_used = 0;
+            sl.extra_used = 0;
+            sl.submits_queued = sl.seq = 0;
+            sl.submits_done.store(0, std::memory_order_release);
+            sl.readbacks.clear();
+            sl.occ_keys.clear();
+            sl.extra_pools.clear();
+            sl.framebuffers.clear();
+        }
+        desc_pool_ = VK_NULL_HANDLE;
+        stream_ = VK_NULL_HANDLE;
+        stream_memory_ = VK_NULL_HANDLE;
+        stream_ptr_ = nullptr;
+        stream_off_ = zero_offset_ = 0;
+        stream_cache_.Clear();
+        if (pool_) vkDestroyCommandPool(device_, pool_, nullptr);  // frees the slots' command buffers
+        pool_ = VK_NULL_HANDLE;
+        cmd_ = VK_NULL_HANDLE;
+        if (acquire_sem_) vkDestroySemaphore(device_, acquire_sem_, nullptr);
+        if (render_sem_) vkDestroySemaphore(device_, render_sem_, nullptr);
+        acquire_sem_ = render_sem_ = VK_NULL_HANDLE;
+        if (pipeline_cache_) vkDestroyPipelineCache(device_, pipeline_cache_, nullptr);
+        pipeline_cache_ = VK_NULL_HANDLE;
+        // The swapchain (device-level); the surface is instance-level and stays.
+        if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+        swapchain_ = VK_NULL_HANDLE;
+        sc_images_.clear();
+        sc_extent_ = {};
+        swapchain_dirty_ = true;
+        // Caches of offsets / ranges into the buffers above, and pointers into images_.
+        index_ranges_.Clear();
+        index_memo_.Clear();
+        small_rts_.clear();
+        fallbacks_.clear();
+        fallbacks_depth_.clear();
+        sampled_copy_gen_.clear();
+        snapshot_gen_.clear();
+        scratch_colors_.clear();
+        // (The pre-hash workers keep running: they only read game memory and write host-side results, no Vulkan.)
+        // Bound-state bookkeeping (the rebuilt device has nothing bound).
+        bound_pipeline_ = VK_NULL_HANDLE;
+        bound_layout_ = VK_NULL_HANDLE;
+        bound_sets_[0] = bound_sets_[1] = VK_NULL_HANDLE;
+        for (auto& b : bound_vb_) b = {};
+        bound_ib_ = {};
+        bound_ib_type_ = VK_INDEX_TYPE_MAX_ENUM;
+        bound_dyn_count_ = 0;
+        push_valid_ = false;
+        dyn_valid_ = false;
+        last_pl_vs_ = last_pl_fs_ = VK_NULL_HANDLE;
+        last_pl_ = VK_NULL_HANDLE;
+        rendering_ = recording_ = false;
+        rendering_key_.clear();
+        no_attachment_extent_ = {0, 0};
+        pass_span_vertices_ = pass_span_max_ = pass_splits_ = 0;
+        pass_written_.clear();
+        draw_images_.clear();
+        // Finally the device itself. The queue and the dynamic-rendering entry points are re-fetched on rebuild.
+        vkDestroyDevice(device_, nullptr);
+        device_ = VK_NULL_HANDLE;
+        queue_ = VK_NULL_HANDLE;
+        begin_rendering_ = nullptr;
+        end_rendering_ = nullptr;
+    }
+    // Rebuild the device after a fault. Render thread, between lists. Returns false if the device could not be
+    // recreated (the game then continues without graphics rather than freezing on a dead device).
+    bool RecoverDevice() {
+        // A fault that recurs immediately after every rebuild (the same oversized draw each frame) must not become a
+        // hot rebuild loop: after a few rapid losses, give up graphics cleanly (the game runs on, no freeze).
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_recovery_ < std::chrono::seconds(10)) {
+            if (++recoveries_ > 3) {
+                LOGE(kTag, "the GPU keeps faulting after rebuild: continuing without graphics");
+                WaitWorkersIdle();
+                DestroyDeviceObjects();
+                init_failed_ = true;
+                device_lost_ = false;
+                return false;
+            }
+        } else {
+            recoveries_ = 1;
+        }
+        last_recovery_ = now;
+        LOGW(kTag, "GPU device lost: rebuilding the Vulkan device (the game continues from the last frame)");
+        WaitWorkersIdle();
+        DestroyDeviceObjects();
+        // Drop any pipeline compiles still referenced (their modules belong to the old device).
+        {
+            std::lock_guard<std::mutex> lk(compile_mutex_);
+            compile_queue_.clear();
+        }
+        compiling_.clear();
+        pipeline_pending_ = false;
+        if (!CreateDeviceAndSlots()) {
+            LOGE(kTag, "the Vulkan device could not be rebuilt: continuing without graphics");
+            init_failed_ = true;  // EnsureDevice must not try to remake the instance on every later call
+            return false;
+        }
+        UseSlot(0);
+        slot_ = rec_slot_ = 0;
+        submit_seq_ = completed_seq_ = 0;
+        device_lost_ = false;
+        LOGI(kTag, "Vulkan device rebuilt: rendering resumes");
         return true;
     }
 
@@ -2881,7 +3160,11 @@ private:
     // and the full one is made on a background thread, in small batches on the worker pool (a texture the render
     // thread needs meanwhile waits one batch at most). The result replaces the preview at the start of a later
     // command list, unless the texture was re-created or uploaded again in between.
-    static constexpr size_t kBgTexels = 512 * 512;  // ETC2 work (texels to convert) from which a texture goes there
+    // ETC2 work (texels to convert) from which a texture gets a quick preview now and its full encode in the
+    // background. Was 512x512: an area load converted ~2000 smaller levels (mips included) fully on the render
+    // thread, holding the frame for seconds (a 4.5 s freeze in the Mali-G615 log). Mali has no BC sampling (unlike
+    // Adreno with BCeNabler), so this conversion is its extra cost; from 128x128 up it runs off the frame thread.
+    static constexpr size_t kBgTexels = 128 * 128;
     struct BgConversion {
         uint64_t addr = 0, serial = 0, upload_gen = 0;
         std::vector<uint8_t> blocks, out;
@@ -2893,6 +3176,7 @@ private:
     std::condition_variable bg_cv_;
     std::deque<std::unique_ptr<BgConversion>> bg_queue_, bg_done_;
     bool bg_started_ = false;
+    std::atomic<bool> bg_busy_{false};  // a conversion is being processed (recovery waits for it)
     uint64_t bg_levels_ = 0, bg_dropped_ = 0;
     double bg_ms_ = 0;
 
@@ -2907,6 +3191,7 @@ private:
                 bg_cv_.wait(lk, [&] { return !bg_queue_.empty(); });
                 c = std::move(bg_queue_.front());
                 bg_queue_.pop_front();
+                bg_busy_.store(true, std::memory_order_release);  // counted before the lock drops
             }
             const auto t0 = std::chrono::steady_clock::now();
             MakeTasks(c->jobs, &tasks);
@@ -2923,6 +3208,7 @@ private:
             c->ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             std::lock_guard<std::mutex> lk(bg_mutex_);
             bg_done_.push_back(std::move(c));
+            bg_busy_.store(false, std::memory_order_release);
         }
     }
 
@@ -3640,11 +3926,16 @@ private:
             si.signalSemaphoreCount = 1;
             si.pSignalSemaphores = &signal;
         }
-        VkResult r = vkQueueSubmit(queue_, 1, &si, sl.fence);
+        VkResult r = device_lost_.load(std::memory_order_acquire) ? VK_ERROR_DEVICE_LOST
+                                                                  : vkQueueSubmit(queue_, 1, &si, sl.fence);
         if (r != VK_SUCCESS) {
+            if (r == VK_ERROR_DEVICE_LOST) NoteDeviceLost();
             static std::atomic<bool> logged{false};
             if (!logged.exchange(true)) LOGW(kTag, "vkQueueSubmit failed: %d", r);
-            vkQueueSubmit(queue_, 0, nullptr, sl.fence);  // the render thread waits on this fence
+            // Signal the fence with an empty submit so the render thread's wait returns — but on a lost device that
+            // submit fails too and the fence would never signal (the 0 fps freeze), so it is skipped: WaitSlotFence
+            // bails out on device_lost_ instead, and the next frame rebuilds the device.
+            if (!device_lost_.load(std::memory_order_acquire)) vkQueueSubmit(queue_, 0, nullptr, sl.fence);
         }
         sl.submits_done.fetch_add(1, std::memory_order_release);
     }
@@ -3729,7 +4020,9 @@ private:
     // giving up (VK_TIMEOUT) after much less than 5 s. Now it waits again until the fence signals (a GPU that is
     // really stuck: up to 60 s, then the whole queue), and every early return is logged.
     uint64_t fence_retries_ = 0;
-    bool device_lost_ = false;
+    std::atomic<bool> device_lost_{false};  // set by the render or recorder thread; recovery clears it
+    int recoveries_ = 0;                    // rapid consecutive device rebuilds (a hot fault loop gives up graphics)
+    std::chrono::steady_clock::time_point last_recovery_{};
     // VK_EXT_device_fault: why the GPU faulted. Arm's Mali drivers name the fault (for example "Tile heap overflow",
     // the 180 MB of intermediate vertex/varying data one render pass may use) and give the address of a page fault.
     void LogDeviceFault() {
@@ -3759,27 +4052,35 @@ private:
         for (uint32_t i = 0; i < counts.vendorInfoCount; i++)
             LOGW(kTag, "  vendor fault %u: %s (code 0x%llx)", i, vendor[i].description,
                  (unsigned long long)vendor[i].vendorFaultCode);
-        if (counts.vendorBinarySize) LOGW(kTag, "  vendor fault binary: %u bytes", counts.vendorBinarySize);
+        if (counts.vendorBinarySize)
+            LOGW(kTag, "  vendor fault binary: %llu bytes", (unsigned long long)counts.vendorBinarySize);
+    }
+    // Marks the device lost once and logs the driver's fault description. Recovery (RecoverDevice) runs at the next
+    // list / present; until then every wait and submit below bails out instead of blocking on a device that is gone.
+    void NoteDeviceLost() {
+        if (device_lost_.exchange(true, std::memory_order_acq_rel)) return;
+        LogDeviceFault();
+        LOGW(kTag, "the GPU device was lost: it will be rebuilt at the next frame");
     }
     void WaitSlotFence(Slot& sl) {
+        // A lost device never signals a fence again (Mali even returns VK_TIMEOUT, not DEVICE_LOST, for a fence whose
+        // submit failed). Waiting on it is what froze the game at 0 fps: bail out and let the next frame rebuild.
+        if (device_lost_) return;
         const auto start = std::chrono::steady_clock::now();
         for (int attempt = 0;; attempt++) {
             const VkResult r = vkWaitForFences(device_, 1, &sl.fence, VK_TRUE, 5000000000ull);
             if (r == VK_SUCCESS) return;
+            if (r == VK_ERROR_DEVICE_LOST) {
+                NoteDeviceLost();
+                return;
+            }
+            if (device_lost_) return;  // lost while this wait was running
             fence_retries_++;
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             static int logged = 0;
             if (logged < 20) {
                 logged++;
                 LOGW(kTag, "GPU fence wait returned %d after %.0f ms (attempt %d): waiting again", int(r), ms, attempt + 1);
-            }
-            if (r == VK_ERROR_DEVICE_LOST) {
-                if (!device_lost_) {
-                    device_lost_ = true;
-                    LogDeviceFault();
-                    LOGW(kTag, "the GPU device was lost: rendering can no longer be trusted");
-                }
-                return;
             }
             if (r != VK_TIMEOUT) {
                 if (vkGetFenceStatus(device_, sl.fence) == VK_SUCCESS) return;
@@ -6366,6 +6667,7 @@ private:
     std::condition_variable compile_cv_;
     std::deque<std::shared_ptr<PipelineJob>> compile_queue_;
     std::vector<std::thread> compilers_;
+    std::atomic<int> compiles_active_{0};  // compiler threads inside BuildPipeline (recovery waits for them)
     std::unordered_map<uint64_t, std::pair<std::vector<uint32_t>, std::shared_ptr<PipelineJob>>> compiling_;
     uint64_t pipeline_waits_ = 0;  // draws skipped while their pipeline compiled (reported)
     bool pipeline_pending_ = false;  // the last GetPipeline returned null because it is still compiling
@@ -6431,8 +6733,10 @@ private:
                         compile_cv_.wait(lk, [&] { return !compile_queue_.empty(); });
                         j = std::move(compile_queue_.front());
                         compile_queue_.pop_front();
+                        compiles_active_.fetch_add(1, std::memory_order_release);  // counted before the lock drops
                     }
                     BuildPipeline(*j);
+                    compiles_active_.fetch_sub(1, std::memory_order_release);
                 }
             });
         for (auto& t : compilers_) t.detach();
@@ -6608,7 +6912,12 @@ private:
     }
 
     // Smallest and largest index of an index buffer. Scanned once and remembered across frames: index
-    // buffers are almost always static. The key includes a sparse checksum so a rewritten buffer is rescanned.
+    // buffers are almost always static. The key includes a content checksum so a rewritten buffer is rescanned.
+    // The checksum used to sample only 16 spots: a streaming buffer (particles, skinned meshes, UI) rewritten
+    // between frames often keeps those spots, so its old, too-small range was reused. That understated the Mali
+    // per-pass vertex estimate (the 180 MB tile-heap guard then never split, and the GPU faulted) and could upload
+    // too few vertices. Small index buffers are now hashed in full — the same lesson the geometry cache learned
+    // (sampling missed partial rewrites); large ones sample 64 spots plus both ends.
     void IndexRange(uint64_t addr, uint32_t count, uint32_t isz, uint32_t* lo, uint32_t* hi) {
         const uint8_t* ib = reinterpret_cast<const uint8_t*>(addr);
         auto at = [&](uint32_t i) -> uint32_t {
@@ -6624,9 +6933,13 @@ private:
             *hi = m->hi;
             return;
         }
-        const uint32_t step = std::max<uint32_t>(1, count / 16);
-        for (uint32_t i = 0; i < count; i += step) key = (key ^ at(i)) * 0x100000001B3ull;
-        key = (key ^ at(count - 1)) * 0x100000001B3ull;
+        if (uint64_t(count) * isz <= (256u << 10)) {
+            for (uint32_t i = 0; i < count; i++) key = (key ^ at(i)) * 0x100000001B3ull;
+        } else {
+            const uint32_t step = std::max<uint32_t>(1, count / 64);
+            for (uint32_t i = 0; i < count; i += step) key = (key ^ at(i)) * 0x100000001B3ull;
+            key = (key ^ at(count - 1)) * 0x100000001B3ull;
+        }
         if (const std::pair<uint32_t, uint32_t>* r = index_ranges_.Find(key)) {
             *lo = r->first;
             *hi = r->second;
@@ -7302,6 +7615,10 @@ private:
     VkPhysicalDeviceProperties props_{};
     VkPhysicalDeviceMemoryProperties mem_props_{};
     VkPhysicalDeviceFeatures features_{};
+    // The enabled-feature chain handed to vkCreateDevice (kept as members so CreateDeviceAndSlots can rebuild the
+    // device on recovery; feat2_.pNext points at feat13_ when Vulkan 1.3 dynamic rendering is available).
+    VkPhysicalDeviceFeatures2 feat2_{};
+    VkPhysicalDeviceVulkan13Features feat13_{};
     VkDevice device_ = VK_NULL_HANDLE;
     uint32_t family_ = 0;
     VkQueue queue_ = VK_NULL_HANDLE;
